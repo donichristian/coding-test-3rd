@@ -16,15 +16,24 @@ pydantic-settings>=2.3.0
 # Document Processing
 PyPDF2==3.0.1
 pdfplumber==0.10.3
-python-docx==1.1.0
+python-docx>=1.1.2
 pypdf==3.17.4
+docling==2.61.1
+# PyTorch with CUDA support for GPU acceleration (if available)
+torch==2.2.2 --index-url https://download.pytorch.org/whl/cu121
+torchvision==0.17.2 --index-url https://download.pytorch.org/whl/cu121
+# Headless OpenCV for containerized environments (no GUI dependencies)
+opencv-python-headless==4.11.0.86
 
-# LLM and Embeddings
-langchain==0.1.0
-langchain-openai==0.0.2
-langchain-community==0.0.10
-openai==1.7.2
+# LLM and Embeddings - Simplified to avoid version conflicts
+openai>=1.6.1,<2.0.0
 anthropic==0.8.1
+google-genai>=0.8.0
+
+# LangChain for RAG and LLM orchestration
+langchain>=0.1.0
+langchain-openai>=0.1.0
+langchain-community>=0.0.20
 
 # Vector Store (using pgvector - PostgreSQL extension)
 # No additional packages needed - pgvector is a PostgreSQL extension

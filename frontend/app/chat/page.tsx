@@ -1,8 +1,8 @@
 'use client'
 
 import { useState, useRef, useEffect } from 'react'
-import { Send, Loader2, FileText } from 'lucide-react'
-import { chatApi } from '@/lib/api'
+import { Send, Loader2, FileText, File } from 'lucide-react'
+import { chatApi, documentApi } from '@/lib/api'
 import { formatCurrency } from '@/lib/utils'
 
 interface Message {
@@ -13,18 +13,36 @@ interface Message {
   timestamp: Date
 }
 
+interface Document {
+  id: number
+  file_name: string
+  parsing_status: string
+  fund_id?: number
+}
+
 export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [conversationId, setConversationId] = useState<string>()
+  const [documents, setDocuments] = useState<Document[]>([])
+  const [selectedDocumentId, setSelectedDocumentId] = useState<number>()
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    // Create conversation on mount
-    chatApi.createConversation().then(conv => {
-      setConversationId(conv.conversation_id)
-    })
+    // Load documents and create conversation on mount
+    const loadData = async () => {
+      try {
+        const docs = await documentApi.list()
+        setDocuments(docs)
+
+        const conv = await chatApi.createConversation()
+        setConversationId(conv.conversation_id)
+      } catch (error) {
+        console.error('Error loading data:', error)
+      }
+    }
+    loadData()
   }, [])
 
   useEffect(() => {
@@ -46,8 +64,8 @@ export default function ChatPage() {
     setLoading(true)
 
     try {
-      const response = await chatApi.query(input, undefined, conversationId)
-      
+      const response = await chatApi.query(input, undefined, conversationId, selectedDocumentId)
+
       const assistantMessage: Message = {
         role: 'assistant',
         content: response.answer,
@@ -76,6 +94,32 @@ export default function ChatPage() {
         <p className="text-gray-600">
           Ask questions about fund performance, metrics, and transactions
         </p>
+
+        {/* Document Selector */}
+        {documents.length > 0 && (
+          <div className="mt-4 p-4 bg-gray-50 rounded-lg">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Select a document to chat about:
+            </label>
+            <select
+              value={selectedDocumentId || ''}
+              onChange={(e) => setSelectedDocumentId(e.target.value ? parseInt(e.target.value) : undefined)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="">General questions (no specific document)</option>
+              {documents.map((doc) => (
+                <option key={doc.id} value={doc.id}>
+                  {doc.file_name} {doc.parsing_status === 'completed' ? '✅' : doc.parsing_status === 'processing' ? '⏳' : '❌'}
+                </option>
+              ))}
+            </select>
+            {selectedDocumentId && (
+              <p className="text-xs text-gray-500 mt-1">
+                Chatting about: {documents.find(d => d.id === selectedDocumentId)?.file_name}
+              </p>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="bg-white rounded-lg shadow-md flex flex-col h-full">
@@ -84,27 +128,53 @@ export default function ChatPage() {
           {messages.length === 0 && (
             <div className="text-center py-12">
               <div className="text-gray-400 mb-4">
-                <FileText className="w-16 h-16 mx-auto" />
+                <File className="w-16 h-16 mx-auto" />
               </div>
               <h3 className="text-lg font-medium text-gray-900 mb-2">
                 Start a conversation
               </h3>
               <p className="text-gray-600 mb-6">
-                Try asking questions like:
+                {selectedDocumentId
+                  ? `Ask questions about ${documents.find(d => d.id === selectedDocumentId)?.file_name}:`
+                  : "Select a document above or try general questions:"
+                }
               </p>
               <div className="space-y-2 max-w-md mx-auto">
-                <SampleQuestion
-                  question="What is the current DPI?"
-                  onClick={() => setInput("What is the current DPI?")}
-                />
-                <SampleQuestion
-                  question="Calculate the IRR for this fund"
-                  onClick={() => setInput("Calculate the IRR for this fund")}
-                />
-                <SampleQuestion
-                  question="What does Paid-In Capital mean?"
-                  onClick={() => setInput("What does Paid-In Capital mean?")}
-                />
+                {selectedDocumentId ? (
+                  <>
+                    <SampleQuestion
+                      question="What is the current DPI?"
+                      onClick={() => setInput("What is the current DPI?")}
+                    />
+                    <SampleQuestion
+                      question="Calculate the IRR for this fund"
+                      onClick={() => setInput("Calculate the IRR for this fund")}
+                    />
+                    <SampleQuestion
+                      question="Show me all capital calls"
+                      onClick={() => setInput("Show me all capital calls")}
+                    />
+                    <SampleQuestion
+                      question="What does Paid-In Capital mean?"
+                      onClick={() => setInput("What does Paid-In Capital mean?")}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <SampleQuestion
+                      question="What is DPI?"
+                      onClick={() => setInput("What is DPI?")}
+                    />
+                    <SampleQuestion
+                      question="How is IRR calculated?"
+                      onClick={() => setInput("How is IRR calculated?")}
+                    />
+                    <SampleQuestion
+                      question="What does Paid-In Capital mean?"
+                      onClick={() => setInput("What does Paid-In Capital mean?")}
+                    />
+                  </>
+                )}
               </div>
             </div>
           )}

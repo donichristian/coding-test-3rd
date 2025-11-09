@@ -1,15 +1,23 @@
 'use client'
 
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import Link from 'next/link'
 import { documentApi } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
-import { FileText, CheckCircle, XCircle, Loader2, Upload } from 'lucide-react'
+import { FileText, CheckCircle, XCircle, Loader2, Upload, Trash2 } from 'lucide-react'
 
 export default function DocumentsPage() {
+  const queryClient = useQueryClient()
   const { data: documents, isLoading, error } = useQuery({
     queryKey: ['documents'],
     queryFn: () => documentApi.list()
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (documentId: number) => documentApi.delete(documentId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['documents'] })
+    },
   })
 
   if (isLoading) {
@@ -74,6 +82,9 @@ export default function DocumentsPage() {
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                   Fund
                 </th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Actions
+                </th>
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
@@ -97,6 +108,23 @@ export default function DocumentsPage() {
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                     {doc.fund_id ? `Fund #${doc.fund_id}` : 'N/A'}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                    <button
+                      onClick={() => {
+                        if (window.confirm('Are you sure you want to delete this document?')) {
+                          deleteMutation.mutate(doc.id)
+                        }
+                      }}
+                      className="text-red-600 hover:text-red-900 transition-colors"
+                      disabled={deleteMutation.isPending}
+                    >
+                      {deleteMutation.isPending ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Trash2 className="w-4 h-4" />
+                      )}
+                    </button>
                   </td>
                 </tr>
               ))}

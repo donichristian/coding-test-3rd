@@ -17,6 +17,7 @@ class ChatQueryRequest(BaseModel):
     """Chat query request schema"""
     query: str
     fund_id: Optional[int] = None
+    document_id: Optional[int] = None
     conversation_id: Optional[str] = None
 
 

@@ -69,16 +69,18 @@ This repository contains a **project scaffold** to help you get started quickly:
 The following **core functionalities are NOT implemented** and need to be built by you:
 
 #### 1. Document Processing Pipeline (Phase 2) - **CRITICAL**
-- [ ] PDF parsing with pdfplumber (integrate and test)
-- [ ] Table detection and extraction logic
-- [ ] Intelligent table classification (capital calls vs distributions vs adjustments)
-- [ ] Data validation and cleaning
-- [ ] Error handling for malformed PDFs
-- [ ] Background task processing (Celery integration)
+- [x] Model pre-loading during Docker build (OCR models cached)
+- [x] PDF parsing with Docling and pdfplumber fallback
+- [x] Table detection and extraction logic
+- [x] Intelligent table classification (capital calls vs distributions vs adjustments)
+- [x] Data validation and cleaning
+- [x] Error handling for malformed PDFs
+- [ ] Background task processing (Celery integration) - Optional enhancement
 
-**Files to implement:**
-- `backend/app/services/document_processor.py` (skeleton provided)
-- `backend/app/services/table_parser.py` (needs implementation)
+**Files implemented:**
+- `backend/app/services/document_processor.py` - Document processing with Docling
+- `backend/app/services/table_parser.py` - Table extraction and classification
+- `backend/preload_models.py` - Model pre-loading script for Docker builds
 
 #### 2. Vector Store & RAG System (Phase 3) - **CRITICAL**
 - [ ] Text chunking strategy implementation
@@ -158,7 +160,7 @@ The following **core functionalities are NOT implemented** and need to be built 
         ┌────────────────┼────────────────┐
         │                │                │
 ┌───────▼────────┐ ┌────▼─────┐ ┌────────▼────────┐
-│   PostgreSQL   │ │  FAISS   │ │     Redis       │
+│   PostgreSQL   │ │ pgvector │ │     Redis       │
 │  (Structured)  │ │ (Vectors)│ │  (Task Queue)   │
 └────────────────┘ └──────────┘ └─────────────────┘
 ```
@@ -313,9 +315,29 @@ cp .env.example .env
 # DATABASE_URL=postgresql://user:password@localhost:5432/funddb
 ```
 
-3. **Start with Docker Compose**
+3. **Choose your development approach**
+
+**Note**: The first build will take longer as it pre-downloads OCR and ML models (RapidOCR, Docling, sentence-transformers) during the Docker build process. This ensures fast document processing without runtime model downloads.
+
+#### Development (Fast iteration, bind mounts)
 ```bash
-docker-compose up -d
+# Build development images (includes model pre-loading)
+make dev-build
+
+# Start development services with hot reload
+make dev
+
+# Or manually:
+docker-compose --profile dev up -d
+```
+
+#### Production (Optimized builds, new images)
+```bash
+# Build and deploy production images (includes model pre-loading)
+make prod-deploy
+
+# Or manually:
+docker-compose --profile prod up -d
 ```
 
 4. **Access the application**
@@ -326,12 +348,63 @@ docker-compose up -d
 5. **Upload sample document**
 - Navigate to http://localhost:3000/upload
 - Upload the provided PDF: `files/ILPA based Capital Accounting and Performance Metrics_ PIC, Net PIC, DPI, IRR  .pdf`
-- Wait for parsing to complete
+- Document processing should be fast (models are pre-loaded during Docker build)
+- Wait for parsing to complete (typically 2-5 seconds for small documents)
 
 6. **Start asking questions**
 - Go to http://localhost:3000/chat
 - Try: "What is DPI?"
 - Try: "Calculate the current DPI for this fund"
+
+### Development vs Production
+
+| Feature | Development | Production |
+|---------|-------------|------------|
+| **Image Building** | Cached layers, faster rebuilds | Clean builds, cache-busting |
+| **Code Changes** | Hot reload via bind mounts | Requires image rebuild |
+| **Dependencies** | Lockfile ignored for speed | Lockfile enforced for reproducibility |
+| **Performance** | Development optimizations | Production optimizations |
+| **Security** | Root user allowed | Non-root user enforced |
+| **Caching** | Aggressive caching | Minimal caching for consistency |
+| **Model Pre-loading** | Models pre-downloaded during build | Models pre-downloaded during build |
+
+#### When to use Development:
+- Active development and debugging
+- Frequent code changes
+- Testing new features
+- Local development workflow
+
+#### When to use Production:
+- Demo deployments
+- Staging environments
+- CI/CD pipelines
+- Performance testing
+- Production deployments
+
+#### Makefile Commands:
+```bash
+# Development
+make dev              # Start dev environment
+make dev-build        # Build dev images
+make dev-up           # Start dev services
+make dev-down         # Stop dev services
+
+# Production
+make prod             # Start prod environment
+make prod-build       # Build prod images (--no-cache)
+make prod-up          # Start prod services
+make prod-deploy      # Build + deploy prod
+
+# Tagging & Deployment
+make tag-prod TAG=v1.0.0    # Tag images with version
+make push-prod TAG=v1.0.0   # Push tagged images
+
+# Cleanup
+make clean             # Stop all services
+make clean-images      # Remove unused images
+make clean-volumes     # Remove unused volumes
+make clean-all         # Complete cleanup
+```
 
 ---
 
@@ -377,6 +450,7 @@ fund-analysis-system/
 │   │   └── test_api.py
 │   ├── requirements.txt
 │   ├── Dockerfile
+│   ├── preload_models.py
 │   └── alembic/
 │       └── versions/
 ├── frontend/
@@ -507,11 +581,14 @@ curl -X POST "http://localhost:8000/api/chat/query" \
 ## Implementation Guidelines
 
 ### Document Parsing Strategy
-1. Use **Docling** to extract document structure
-2. Identify tables by headers (e.g., "Capital Call", "Distribution")
-3. Parse table rows and map to SQL schema
-4. Extract text paragraphs for vector storage
-5. Handle parsing errors gracefully
+1. Use **Docling** to extract document structure (OCR models pre-loaded during Docker build)
+2. Use **pdfplumber** as fallback for table extraction if Docling fails
+3. Identify tables by headers (e.g., "Capital Call", "Distribution")
+4. Parse table rows and map to SQL schema
+5. Extract text paragraphs for vector storage
+6. Handle parsing errors gracefully
+
+**Performance Optimization**: OCR and ML models (RapidOCR, Docling, sentence-transformers) are pre-downloaded during Docker image build via `preload_models.py`, ensuring fast document processing without runtime downloads.
 
 ### RAG Pipeline
 1. **Retrieval**: Vector similarity search (top-k=5)
@@ -651,12 +728,20 @@ curl -X POST "http://localhost:8000/api/chat/query" \
 
 ## Troubleshooting
 
+### Model Download Issues
+**Problem**: Document processing is slow on first upload
+**Solution**: 
+- Ensure models were pre-loaded during Docker build (check build logs for "Model pre-loading complete")
+- Rebuild the Docker image: `make dev-build` or `make prod-build`
+- Models are cached in the Docker image, so subsequent uploads should be fast
+
 ### Document Parsing Issues
 **Problem**: Docling can't extract tables
 **Solution**: 
 - Check PDF format (ensure it's not scanned image)
 - Add fallback parsing logic
 - Manually define table structure patterns
+- The system uses pdfplumber as a fallback if Docling fails
 
 ### LLM API Costs
 **Problem**: OpenAI API is expensive
@@ -678,6 +763,14 @@ curl -X POST "http://localhost:8000/api/chat/query" \
 - Add CORS middleware in FastAPI
 - Allow origin: http://localhost:3000
 - Check network configuration in Docker
+
+### Slow Document Processing
+**Problem**: Document upload takes too long (>30 seconds)
+**Solution**:
+- Verify models were pre-loaded: Check Docker build logs for "Model pre-loading complete"
+- Rebuild images if models weren't pre-loaded: `make dev-build` or `make prod-build`
+- Check network connectivity (models download from external sources during build)
+- Processing should be fast (2-5 seconds) once models are cached
 
 ---
 

@@ -49,3 +49,6 @@ logs/
 .coverage
 htmlcov/
 .pytest_cache/
+
+.cursor
+.kilocode

@@ -7,7 +7,19 @@ export const api = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
+  withCredentials: false, // Keep disabled for CORS simplicity
 })
+
+// Add request interceptor to handle CORS preflight
+api.interceptors.request.use((config) => {
+  // For file uploads, don't set Content-Type - let browser set it with boundary
+  if (config.data instanceof FormData) {
+    delete config.headers['Content-Type']
+  }
+  return config
+})
+
+// Remove CORS headers from client-side - let the server handle CORS
 
 // Document APIs
 export const documentApi = {
@@ -17,17 +29,28 @@ export const documentApi = {
     if (fundId) {
       formData.append('fund_id', fundId.toString())
     }
-    
-    const response = await api.post('/api/documents/upload', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
+
+    // Use fetch directly for file uploads to avoid axios CORS issues
+    const response = await fetch(`${API_URL}/api/documents/upload`, {
+      method: 'POST',
+      body: formData,
+      // Don't set Content-Type header - let browser set it with boundary
     })
-    return response.data
+
+    if (!response.ok) {
+      throw new Error(`Upload failed: ${response.status} ${response.statusText}`)
+    }
+
+    return response.json()
   },
   
   getStatus: async (documentId: number) => {
     const response = await api.get(`/api/documents/${documentId}/status`)
+    return response.data
+  },
+
+  getDetails: async (documentId: number) => {
+    const response = await api.get(`/api/documents/${documentId}`)
     return response.data
   },
   
@@ -75,10 +98,11 @@ export const fundApi = {
 
 // Chat APIs
 export const chatApi = {
-  query: async (query: string, fundId?: number, conversationId?: string) => {
+  query: async (query: string, fundId?: number, conversationId?: string, documentId?: number) => {
     const response = await api.post('/api/chat/query', {
       query,
       fund_id: fundId,
+      document_id: documentId,
       conversation_id: conversationId,
     })
     return response.data

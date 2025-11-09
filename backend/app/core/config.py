@@ -20,10 +20,11 @@ class Settings(BaseSettings):
         "http://localhost:3000",
         "http://localhost:3001",
         "http://127.0.0.1:3000",
+        "*",  # Allow all origins for development
     ]
     
     # Database
-    DATABASE_URL: str = "postgresql://funduser:fundpass@localhost:5432/funddb"
+    DATABASE_URL: str = "postgresql://funduser:fundpass@172.20.0.2:5432/funddb"
     
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -32,7 +33,11 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-4-turbo-preview"
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
-    
+
+    # Google Gemini
+    GOOGLE_API_KEY: str = "AIzaSyCwfAAnr9l3v3ixG1TxznIGvBPAKvHsXCY"
+    GEMINI_MODEL: str = "gemini-2.5-flash-exp"
+
     # Anthropic (optional)
     ANTHROPIC_API_KEY: str = ""
     

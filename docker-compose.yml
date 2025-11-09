@@ -1,5 +1,8 @@
 version: '3.8'
 
+# Development profile (default) - uses bind mounts and dev servers
+# Production profile - uses built images with proper caching and tagging
+
 services:
   postgres:
     image: pgvector/pgvector:pg15
@@ -14,7 +17,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./backend/init_pgvector.sql:/docker-entrypoint-initdb.d/init_pgvector.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U funduser"]
+      test: ["CMD-SHELL", "pg_isready -U funduser -d funddb"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -36,6 +39,10 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      target: development
+      args:
+        BUILDKIT_INLINE_CACHE: 1
+    image: fund-backend:dev
     container_name: fund-backend
     ports:
       - "8000:8000"
@@ -48,6 +55,7 @@ services:
       - UPLOAD_DIR=/app/uploads
     volumes:
       - ./backend:/app
+      - ./files:/app/files
       - backend_uploads:/app/uploads
     depends_on:
       postgres:
@@ -56,14 +64,20 @@ services:
         condition: service_healthy
     command: >
       sh -c "
-        python app/db/init_db.py &&
+        python -m app.db.init_db &&
         uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
       "
+    profiles:
+      - dev
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      target: development
+      args:
+        BUILDKIT_INLINE_CACHE: 1
+    image: fund-frontend:dev
     container_name: fund-frontend
     ports:
       - "3000:3000"
@@ -76,6 +90,60 @@ services:
     depends_on:
       - backend
     command: npm run dev
+    profiles:
+      - dev
+
+  # Production services (use --profile prod)
+  backend-prod:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: production
+      args:
+        BUILDKIT_INLINE_CACHE: 1
+    image: fund-backend:${TAG:-latest}
+    container_name: fund-backend-prod
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://funduser:fundpass@postgres:5432/funddb
+      - REDIS_URL=redis://redis:6379/0
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4-turbo-preview}
+      - OPENAI_EMBEDDING_MODEL=${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      - UPLOAD_DIR=/app/uploads
+    volumes:
+      - backend_uploads:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "
+        python -m app.db.init_db &&
+        uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+      "
+    profiles:
+      - prod
+
+  frontend-prod:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: production
+      args:
+        BUILDKIT_INLINE_CACHE: 1
+    image: fund-frontend:${TAG:-latest}
+    container_name: fund-frontend-prod
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      - backend-prod
+    profiles:
+      - prod
 
 volumes:
   postgres_data:

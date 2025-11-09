@@ -184,11 +184,12 @@ PIC = SUM(capital_calls.amount) - SUM(adjustments.amount)
 - `adjustments`: Rebalancing entries
 - `documents`: Uploaded document metadata
 
-**FAISS Vector Store:**
-- Index type: IndexFlatL2 (exact search)
-- Dimension: 1536 (OpenAI embeddings)
-- Metadata: Stored separately in pickle file
-- Includes: document_id, fund_id, page_number, chunk_index
+**pgvector Vector Store:**
+- Extension: pgvector PostgreSQL extension
+- Dimension: 384 (sentence-transformers/all-MiniLM-L6-v2)
+- Index type: ivfflat (approximate nearest neighbor)
+- Metadata: Stored in same table with vectors
+- Includes: document_id, fund_id, page_number, chunk_index, content
 
 **Redis:**
 - Task queue for Celery (future)

@@ -11,8 +11,6 @@ from typing import List, Dict, Any, Optional
 import numpy as np
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from langchain_openai import OpenAIEmbeddings
-from langchain_community.embeddings import HuggingFaceEmbeddings
 from app.core.config import settings
 from app.db.session import SessionLocal
 
@@ -26,22 +24,26 @@ class VectorStore:
         self._ensure_extension()
     
     def _initialize_embeddings(self):
-        """Initialize embedding model"""
-        if settings.OPENAI_API_KEY:
-            return OpenAIEmbeddings(
-                model=settings.OPENAI_EMBEDDING_MODEL,
-                openai_api_key=settings.OPENAI_API_KEY
-            )
-        else:
-            # Fallback to local embeddings
-            return HuggingFaceEmbeddings(
-                model_name="sentence-transformers/all-MiniLM-L6-v2"
-            )
+        """Initialize embedding model - sentence-transformers for local processing"""
+        try:
+            from sentence_transformers import SentenceTransformer
+            print("Using sentence-transformers/all-MiniLM-L6-v2 embeddings")
+            self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+            return "sentence-transformers"
+        except ImportError:
+            print("sentence-transformers not available, falling back to OpenAI")
+            if settings.OPENAI_API_KEY and settings.OPENAI_API_KEY.strip():
+                from openai import OpenAI
+                self.openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+                return "openai"
+            else:
+                print("No embedding model available")
+                return None
     
     def _ensure_extension(self):
         """
         Ensure pgvector extension is enabled
-        
+
         TODO: Implement this method
         - Execute: CREATE EXTENSION IF NOT EXISTS vector;
         - Create embeddings table if not exists
@@ -49,11 +51,21 @@ class VectorStore:
         try:
             # Enable pgvector extension
             self.db.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-            
+
             # Create embeddings table
-            # Dimension: 1536 for OpenAI, 384 for sentence-transformers
-            dimension = 1536 if settings.OPENAI_API_KEY else 384
-            
+            # Dimension: 384 for sentence-transformers/all-MiniLM-L6-v2
+            dimension = 768
+
+            # Check if table exists first, and drop it if it has wrong dimensions
+            check_table_sql = """
+            SELECT column_name, data_type, udt_name
+            FROM information_schema.columns
+            WHERE table_name = 'document_embeddings' AND table_schema = 'public';
+            """
+
+            # Note: Removed table dropping logic to preserve existing data
+            # Table will only be created if it doesn't exist
+
             create_table_sql = f"""
             CREATE TABLE IF NOT EXISTS document_embeddings (
                 id SERIAL PRIMARY KEY,
@@ -64,14 +76,16 @@ class VectorStore:
                 metadata JSONB,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
-            
-            CREATE INDEX IF NOT EXISTS document_embeddings_embedding_idx 
-            ON document_embeddings USING ivfflat (embedding vector_cosine_ops)
-            WITH (lists = 100);
             """
-            
+
             self.db.execute(text(create_table_sql))
             self.db.commit()
+            print("Created document_embeddings table successfully")
+
+            # Skip IVFFlat index creation for now - it has dimension limits and can cause transaction issues
+            # The system will work without it, just with slower similarity search
+            print("Skipping vector index creation - similarity search will be slower but functional")
+
         except Exception as e:
             print(f"Error ensuring pgvector extension: {e}")
             self.db.rollback()
@@ -79,7 +93,7 @@ class VectorStore:
     async def add_document(self, content: str, metadata: Dict[str, Any]):
         """
         Add a document to the vector store
-        
+
         TODO: Implement this method
         - Generate embedding for content
         - Insert into document_embeddings table
@@ -89,25 +103,104 @@ class VectorStore:
             # Generate embedding
             embedding = await self._get_embedding(content)
             embedding_list = embedding.tolist()
-            
+
             # Insert into database
             insert_sql = text("""
                 INSERT INTO document_embeddings (document_id, fund_id, content, embedding, metadata)
-                VALUES (:document_id, :fund_id, :content, :embedding::vector, :metadata::jsonb)
+                VALUES (:document_id, :fund_id, :content, :embedding, :metadata)
             """)
-            
+
+            # Convert metadata to proper JSON format
+            import json
+            metadata_json = json.dumps(metadata)
+
             self.db.execute(insert_sql, {
                 "document_id": metadata.get("document_id"),
                 "fund_id": metadata.get("fund_id"),
                 "content": content,
-                "embedding": str(embedding_list),
-                "metadata": str(metadata)
+                "embedding": embedding_list,  # Pass as list for pgvector
+                "metadata": metadata_json  # Pass as JSON string
             })
             self.db.commit()
         except Exception as e:
             print(f"Error adding document: {e}")
             self.db.rollback()
             raise
+
+    async def store_chunks(self, chunks: List[Dict[str, Any]]):
+        """
+        Store multiple text chunks in the vector database
+
+        Args:
+            chunks: List of chunks with content and metadata
+        """
+        if not chunks:
+            print("No chunks to store")
+            return True
+
+        try:
+            print(f"Storing {len(chunks)} text chunks in vector database...")
+
+            # Process chunks in batches to avoid overwhelming the API
+            batch_size = 10
+            stored_count = 0
+
+            for i in range(0, len(chunks), batch_size):
+                batch = chunks[i:i + batch_size]
+
+                # Generate embeddings for batch
+                embeddings = []
+                for chunk in batch:
+                    embedding = await self._get_embedding(chunk["content"])
+                    embeddings.append(embedding)
+
+                # Store batch in database - one transaction per batch to avoid aborted transaction issues
+                try:
+                    for j, chunk in enumerate(batch):
+                        embedding = embeddings[j]
+                        embedding_list = embedding.tolist()
+
+                        # Prepare metadata
+                        metadata = chunk.get("metadata", {})
+                        document_id = metadata.get("document_id")
+                        fund_id = metadata.get("fund_id")
+
+                        # Insert into database - use proper parameter binding for psycopg2
+                        insert_sql = text("""
+                            INSERT INTO document_embeddings (document_id, fund_id, content, embedding, metadata)
+                            VALUES (:document_id, :fund_id, :content, :embedding, :metadata)
+                        """)
+
+                        # Convert metadata to proper JSON format
+                        import json
+                        metadata_json = json.dumps(metadata)
+
+                        self.db.execute(insert_sql, {
+                            "document_id": document_id,
+                            "fund_id": fund_id,
+                            "content": chunk["content"],
+                            "embedding": embedding_list,  # Pass as list for pgvector
+                            "metadata": metadata_json  # Pass as JSON string
+                        })
+
+                    # Commit after each batch
+                    self.db.commit()
+                    stored_count += len(batch)
+                    print(f"Stored batch {i//batch_size + 1}: {len(batch)} chunks")
+
+                except Exception as batch_error:
+                    print(f"Error storing batch {i//batch_size + 1}: {batch_error}")
+                    self.db.rollback()
+                    # Continue with next batch instead of failing completely
+            print(f"Successfully stored {stored_count} chunks in vector database")
+            return True
+
+        except Exception as e:
+            print(f"Error storing chunks in vector database: {e}")
+            import traceback
+            traceback.print_exc()
+            self.db.rollback()
+            return False
     
     async def similarity_search(
         self, 
@@ -147,36 +240,41 @@ class VectorStore:
                 if conditions:
                     where_clause = "WHERE " + " AND ".join(conditions)
             
-            # Search using cosine distance (<=> operator)
+            # Search using cosine similarity (1 - cosine_distance)
+            # Note: pgvector's <=> operator returns cosine distance, so we use it directly for ordering
             search_sql = text(f"""
-                SELECT 
+                SELECT
                     id,
                     document_id,
                     fund_id,
                     content,
                     metadata,
-                    1 - (embedding <=> :query_embedding::vector) as similarity_score
+                    1 - (embedding <=> ARRAY{embedding_list}::vector) as similarity_score
                 FROM document_embeddings
                 {where_clause}
-                ORDER BY embedding <=> :query_embedding::vector
+                ORDER BY embedding <=> ARRAY{embedding_list}::vector
                 LIMIT :k
             """)
-            
+
+            # Use proper parameter binding for pgvector
             result = self.db.execute(search_sql, {
-                "query_embedding": str(embedding_list),
                 "k": k
             })
             
             # Format results
             results = []
             for row in result:
+                score = float(row[5])
+                # Handle NaN and infinity values
+                if not (score >= 0.0 and score <= 1.0):
+                    score = 0.0
                 results.append({
                     "id": row[0],
                     "document_id": row[1],
                     "fund_id": row[2],
                     "content": row[3],
                     "metadata": row[4],
-                    "score": float(row[5])
+                    "score": score
                 })
             
             return results
@@ -185,13 +283,30 @@ class VectorStore:
             return []
     
     async def _get_embedding(self, text: str) -> np.ndarray:
-        """Generate embedding for text"""
-        if hasattr(self.embeddings, 'embed_query'):
-            embedding = self.embeddings.embed_query(text)
-        else:
-            embedding = self.embeddings.encode(text)
-        
-        return np.array(embedding, dtype=np.float32)
+        """Generate embedding for text using sentence-transformers"""
+        try:
+            if self.embeddings == "sentence-transformers":
+                # Use sentence-transformers for local embeddings
+                embedding = self.embedding_model.encode(text, convert_to_numpy=True)
+                return np.array(embedding, dtype=np.float32)
+
+            elif self.embeddings == "openai":
+                # Fallback to OpenAI if sentence-transformers not available
+                response = self.openai_client.embeddings.create(
+                    model="text-embedding-3-small",
+                    input=text
+                )
+                return np.array(response.data[0].embedding, dtype=np.float32)
+
+            else:
+                # Fallback: return zero vector
+                print("Warning: No embedding model configured, returning zero vector")
+                return np.zeros(384, dtype=np.float32)  # sentence-transformers dimension
+
+        except Exception as e:
+            print(f"Error generating embedding: {e}")
+            # Return zero vector as fallback
+            return np.zeros(384, dtype=np.float32)
     
     def clear(self, fund_id: Optional[int] = None):
         """

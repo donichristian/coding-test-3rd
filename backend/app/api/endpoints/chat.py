@@ -28,17 +28,31 @@ async def process_chat_query(
     db: Session = Depends(get_db)
 ):
     """Process a chat query using RAG"""
-    
+
     # Get conversation history if conversation_id provided
     conversation_history = []
     if request.conversation_id and request.conversation_id in conversations:
         conversation_history = conversations[request.conversation_id]["messages"]
-    
+
+    # Determine document_id from fund_id if needed
+    document_id = None
+    if request.fund_id:
+        # Find the most recent completed document for this fund
+        from app.models.document import Document
+        recent_doc = db.query(Document).filter(
+            Document.fund_id == request.fund_id,
+            Document.parsing_status == "completed"
+        ).order_by(Document.upload_date.desc()).first()
+
+        if recent_doc:
+            document_id = recent_doc.id
+
     # Process query
     query_engine = QueryEngine(db)
     response = await query_engine.process_query(
         query=request.query,
         fund_id=request.fund_id,
+        document_id=document_id,
         conversation_history=conversation_history
     )
     
