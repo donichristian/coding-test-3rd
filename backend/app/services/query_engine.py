@@ -40,7 +40,7 @@ class QueryEngine:
         start_time = time.time()
 
         # Use the new RAG engine for processing
-        result = self.rag_engine.query(query, fund_id)
+        result = await self.rag_engine.query(query, fund_id)
 
         # Add additional metadata
         result["processing_time"] = round(time.time() - start_time, 2)
@@ -48,6 +48,10 @@ class QueryEngine:
         # Format sources for backward compatibility
         if "sources" not in result:
             result["sources"] = []
+
+        # Rename 'response' to 'answer' for API compatibility
+        if "response" in result:
+            result["answer"] = result.pop("response")
 
         # Get metrics if fund_id provided and not already included
         if fund_id and "metrics" not in result:

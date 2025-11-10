@@ -14,6 +14,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from langchain_openai import ChatOpenAI
 from langchain_community.llms import Ollama
+from langchain_google_genai import ChatGoogleGenerativeAI
 from app.core.config import settings
 from app.services.vector_store import VectorStore
 from app.services.metrics_calculator import MetricsCalculator
@@ -29,15 +30,16 @@ class RAGEngine:
     def __init__(self):
         self.vector_store = VectorStore()
         self.llm = self._initialize_llm()
-        self.metrics_calculator = MetricsCalculator()
+        self.metrics_calculator = None  # Will be initialized when needed
 
     def _initialize_llm(self):
         """Initialize LLM based on configuration"""
-        if settings.OLLAMA_BASE_URL and settings.OLLAMA_MODEL:
-            # Use Ollama for local LLM
-            return Ollama(
-                base_url=settings.OLLAMA_BASE_URL,
-                model=settings.OLLAMA_MODEL
+        if settings.GEMINI_API_KEY:
+            # Use Google Gemini as primary LLM
+            return ChatGoogleGenerativeAI(
+                model=settings.GEMINI_MODEL,
+                google_api_key=settings.GEMINI_API_KEY,
+                temperature=0.1
             )
         elif settings.OPENAI_API_KEY:
             # Use OpenAI as fallback
@@ -47,7 +49,9 @@ class RAGEngine:
                 temperature=0.1
             )
         else:
-            raise ValueError("No LLM configuration found. Set OLLAMA_BASE_URL/OLLAMA_MODEL or OPENAI_API_KEY")
+            # Fallback to a simple response system if no LLM is configured
+            logger.warning("No LLM configuration found. Using fallback response system.")
+            return None
 
     def classify_intent(self, query: str) -> str:
         """
@@ -78,7 +82,7 @@ class RAGEngine:
 
         return "general"
 
-    def retrieve_context(self, query: str, fund_id: Optional[int] = None, k: int = 5) -> List[Dict[str, Any]]:
+    async def retrieve_context(self, query: str, fund_id: Optional[int] = None, k: int = 5) -> List[Dict[str, Any]]:
         """
         Retrieve relevant context from vector store
 
@@ -92,7 +96,7 @@ class RAGEngine:
         """
         try:
             filter_metadata = {"fund_id": fund_id} if fund_id else None
-            results = self.vector_store.similarity_search(
+            results = await self.vector_store.similarity_search(
                 query=query,
                 k=k,
                 filter_metadata=filter_metadata
@@ -114,7 +118,10 @@ class RAGEngine:
         """
         try:
             db = SessionLocal()
-            metrics = self.metrics_calculator.calculate_all_metrics(db, fund_id)
+            if self.metrics_calculator is None:
+                from app.services.metrics_calculator import MetricsCalculator
+                self.metrics_calculator = MetricsCalculator(db)
+            metrics = self.metrics_calculator.calculate_all_metrics(fund_id)
             db.close()
             return metrics
         except Exception as e:
@@ -169,6 +176,11 @@ class RAGEngine:
             Dictionary with response and metadata
         """
         try:
+            # Check if LLM is available
+            if self.llm is None:
+                # Fallback response system
+                return self._generate_fallback_response(query, context, intent)
+
             # Create prompt based on intent
             if intent == "calculation":
                 system_prompt = """You are a fund performance analysis expert. Use the provided metrics and document context to accurately answer calculation questions about fund performance (DPI, IRR, PIC, etc.).
@@ -250,7 +262,87 @@ Answer:"""
                 "success": False
             }
 
-    def query(self, query: str, fund_id: Optional[int] = None) -> Dict[str, Any]:
+    def _generate_fallback_response(self, query: str, context: str, intent: str) -> Dict[str, Any]:
+        """
+        Generate a fallback response when LLM is not available
+
+        Args:
+            query: User query
+            context: Formatted context
+            intent: Classified intent
+
+        Returns:
+            Dictionary with fallback response
+        """
+        query_lower = query.lower()
+
+        # Simple keyword-based responses
+        if intent == "calculation" or "dpi" in query_lower:
+            if "dpi" in context.lower():
+                return {
+                    "response": "Based on the document context, I can see DPI (Distributions to Paid-In) information. DPI measures how much capital has been returned to investors relative to their original investment. A DPI of 1.0 means all invested capital has been returned.",
+                    "intent": intent,
+                    "context_used": True,
+                    "success": True
+                }
+            else:
+                return {
+                    "response": "DPI (Distributions to Paid-In) measures how much capital has been returned to investors relative to their original investment. A DPI of 1.0 means all invested capital has been returned.",
+                    "intent": intent,
+                    "context_used": False,
+                    "success": True
+                }
+
+        elif "irr" in query_lower:
+            if "irr" in context.lower():
+                return {
+                    "response": "Based on the document context, I can see IRR (Internal Rate of Return) information. IRR is the annualized rate of return that makes the net present value of all cash flows equal to zero.",
+                    "intent": intent,
+                    "context_used": True,
+                    "success": True
+                }
+            else:
+                return {
+                    "response": "IRR (Internal Rate of Return) is the annualized rate of return that makes the net present value of all cash flows equal to zero.",
+                    "intent": intent,
+                    "context_used": False,
+                    "success": True
+                }
+
+        elif "pic" in query_lower or "paid-in capital" in query_lower:
+            if "paid-in capital" in context.lower() or "pic" in context.lower():
+                return {
+                    "response": "Based on the document context, I can see Paid-In Capital (PIC) information. PIC represents the total capital contributed by investors to the fund.",
+                    "intent": intent,
+                    "context_used": True,
+                    "success": True
+                }
+            else:
+                return {
+                    "response": "Paid-In Capital (PIC) is the total amount of capital that investors have contributed to the fund.",
+                    "intent": intent,
+                    "context_used": False,
+                    "success": True
+                }
+
+        else:
+            # Generic response with context
+            if context.strip():
+                return {
+                    "response": f"Based on the document context, I can help you understand fund performance metrics. The document contains relevant information about fund performance. Try asking about specific metrics like DPI, IRR, or Paid-In Capital.",
+                    "intent": intent,
+                    "context_used": True,
+                    "success": True
+                }
+            else:
+                return {
+                    "response": "I'm here to help you analyze fund performance data. Please upload a document first, then ask questions about metrics like DPI, IRR, or Paid-In Capital.",
+                    "intent": intent,
+                    "context_used": False,
+                    "success": True
+                }
+
+    async def query(self, query: str, fund_id: Optional[int] = None) -> Dict[str, Any]:
         """
         Main query method implementing the complete RAG pipeline
 
@@ -267,7 +359,7 @@ Answer:"""
             logger.info(f"Classified query intent: {intent}")
 
             # Step 2: Retrieve context
-            retrieved_docs = self.retrieve_context(query, fund_id)
+            retrieved_docs = await self.retrieve_context(query, fund_id)
             logger.info(f"Retrieved {len(retrieved_docs)} document chunks")
 
             # Step 3: Get metrics data if fund_id provided

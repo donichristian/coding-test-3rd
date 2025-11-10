@@ -24,67 +24,63 @@ class VectorStore:
         self._ensure_extension()
     
     def _initialize_embeddings(self):
-        """Initialize embedding model - sentence-transformers for local processing"""
+        """Initialize embedding model - sentence-transformers primary, Gemini API fallback, OpenAI last"""
         try:
+            # Try sentence-transformers first (local, no API key needed)
             from sentence_transformers import SentenceTransformer
-            print("Using sentence-transformers/all-MiniLM-L6-v2 embeddings")
+            print("Using sentence-transformers/all-MiniLM-L6-v2 embeddings (primary)")
             self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
             return "sentence-transformers"
         except ImportError:
-            print("sentence-transformers not available, falling back to OpenAI")
-            if settings.OPENAI_API_KEY and settings.OPENAI_API_KEY.strip():
-                from openai import OpenAI
-                self.openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
-                return "openai"
-            else:
-                print("No embedding model available")
-                return None
+            print("sentence-transformers not available, falling back to Gemini API")
+
+        if settings.GEMINI_API_KEY and settings.GEMINI_API_KEY.strip():
+            try:
+                # Check if google-genai is available
+                import google.genai
+                print("Using Gemini embeddings (fallback)")
+                return "gemini"
+            except ImportError:
+                print("google-genai library not installed, falling back to OpenAI")
+                if settings.OPENAI_API_KEY and settings.OPENAI_API_KEY.strip():
+                    from openai import OpenAI
+                    self.openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+                    return "openai"
+                else:
+                    print("No embedding API keys configured")
+                    return None
+        elif settings.OPENAI_API_KEY and settings.OPENAI_API_KEY.strip():
+            # Fallback: OpenAI (only if Gemini not available)
+            print("Using OpenAI embeddings (fallback)")
+            from openai import OpenAI
+            self.openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+            return "openai"
+        else:
+            # No API keys available
+            print("No embedding API keys configured")
+            return None
     
     def _ensure_extension(self):
         """
-        Ensure pgvector extension is enabled
+        Ensure pgvector extension is enabled and table exists
 
-        TODO: Implement this method
-        - Execute: CREATE EXTENSION IF NOT EXISTS vector;
-        - Create embeddings table if not exists
+        Note: Table creation is now handled in init_db.py during database initialization
+        This method just verifies the setup is correct.
         """
         try:
-            # Enable pgvector extension
+            # Enable pgvector extension (should already be done in init_db.py)
             self.db.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
 
-            # Create embeddings table
-            # Dimension: 384 for sentence-transformers/all-MiniLM-L6-v2
-            dimension = 768
+            # Verify table exists
+            try:
+                test_sql = "SELECT 1 FROM document_embeddings LIMIT 1;"
+                self.db.execute(text(test_sql))
+                print("Table document_embeddings exists and is accessible")
+            except Exception:
+                print("Warning: document_embeddings table not found. It should be created during database initialization.")
+                print("Please run database initialization: python -m app.db.init_db")
 
-            # Check if table exists first, and drop it if it has wrong dimensions
-            check_table_sql = """
-            SELECT column_name, data_type, udt_name
-            FROM information_schema.columns
-            WHERE table_name = 'document_embeddings' AND table_schema = 'public';
-            """
-
-            # Note: Removed table dropping logic to preserve existing data
-            # Table will only be created if it doesn't exist
-
-            create_table_sql = f"""
-            CREATE TABLE IF NOT EXISTS document_embeddings (
-                id SERIAL PRIMARY KEY,
-                document_id INTEGER,
-                fund_id INTEGER,
-                content TEXT NOT NULL,
-                embedding vector({dimension}),
-                metadata JSONB,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            """
-
-            self.db.execute(text(create_table_sql))
             self.db.commit()
-            print("Created document_embeddings table successfully")
-
-            # Skip IVFFlat index creation for now - it has dimension limits and can cause transaction issues
-            # The system will work without it, just with slower similarity search
-            print("Skipping vector index creation - similarity search will be slower but functional")
 
         except Exception as e:
             print(f"Error ensuring pgvector extension: {e}")
@@ -283,12 +279,36 @@ class VectorStore:
             return []
     
     async def _get_embedding(self, text: str) -> np.ndarray:
-        """Generate embedding for text using sentence-transformers"""
+        """Generate embedding for text using configured model"""
         try:
             if self.embeddings == "sentence-transformers":
                 # Use sentence-transformers for local embeddings
                 embedding = self.embedding_model.encode(text, convert_to_numpy=True)
                 return np.array(embedding, dtype=np.float32)
+
+            elif self.embeddings == "gemini":
+                try:
+                    from google import genai
+                    from google.genai import types
+                    client = genai.Client(api_key=settings.GEMINI_API_KEY)
+                    # Use Gemini embedding model with controlled dimensionality
+                    result = client.models.embed_content(
+                        model="gemini-embedding-001",
+                        contents=[text],
+                        config=types.EmbedContentConfig(output_dimensionality=768)
+                    )
+                    # Return numpy array from embedding values
+                    return np.array(result.embeddings[0].values, dtype=np.float32)
+                except ImportError:
+                    # Fallback to old API if new one not available
+                    import google.generativeai as genai
+                    genai.configure(api_key=settings.GEMINI_API_KEY)
+                    result = genai.embed_content(
+                        model="models/embedding-001",
+                        content=text,
+                        task_type="retrieval_document"
+                    )
+                    return np.array(result['embedding'], dtype=np.float32)
 
             elif self.embeddings == "openai":
                 # Fallback to OpenAI if sentence-transformers not available
