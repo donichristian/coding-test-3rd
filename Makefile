@@ -1,4 +1,4 @@
-.PHONY: help dev dev-build dev-up dev-down prod prod-build prod-up prod-deploy clean clean-images clean-volumes
+.PHONY: help dev dev-build dev-up dev-down prod prod-build prod-up prod-deploy clean clean-images clean-volumes clean-fund-images
 
 # Default target
 help: ## Show this help message
@@ -8,7 +8,7 @@ help: ## Show this help message
 # Development commands
 dev: ## Start development environment (default)
 	@echo "Starting development environment..."
-	docker compose --profile dev up -d
+	docker compose --profile dev up -d postgres redis backend frontend celery_worker
 	@echo "Development environment started!"
 	@echo "Frontend: http://localhost:3000"
 	@echo "Backend: http://localhost:8000"
@@ -17,6 +17,8 @@ dev: ## Start development environment (default)
 dev-build: ## Build development images
 	@echo "Building development images..."
 	docker compose build
+	@echo "Cleaning up dangling images..."
+	docker image prune -f
 	@echo "Development images built successfully!"
 
 dev-build-backend: ## Build only backend development image
@@ -71,7 +73,7 @@ stop-prod: ## Stop only production containers
 # Production commands
 prod: ## Start production environment
 	@echo "Starting production environment..."
-	docker compose --profile prod up -d
+	docker compose --profile prod up -d postgres redis backend-prod frontend-prod celery_worker_prod
 	@echo "Production environment started!"
 	@echo "Frontend: http://localhost:3000"
 	@echo "Backend: http://localhost:8000"
@@ -79,6 +81,8 @@ prod: ## Start production environment
 prod-build: ## Build production images with cache-busting
 	@echo "Building production images..."
 	docker compose --profile prod build --no-cache
+	@echo "Cleaning up dangling images..."
+	docker image prune -f
 	@echo "Production images built successfully!"
 
 prod-build-backend: ## Build only backend production image with cache-busting
@@ -97,8 +101,9 @@ prod-deploy: ## Deploy production (build + up)
 	docker compose --profile prod build --no-cache
 	@echo "Starting production services..."
 	docker compose --profile prod up -d
-	@echo "Cleaning up dangling images..."
+	@echo "Cleaning up dangling images and unused images..."
 	docker image prune -f
+	docker image prune -a --filter type=exec -f
 	@echo "Production deployment complete!"
 
 # Tagging commands
@@ -123,7 +128,8 @@ clean: ## Stop all services and clean containers
 clean-images: ## Remove unused images
 	@echo "Removing unused images..."
 	docker image prune -f
-	docker image prune -a --filter type=exec -f
+	@echo "Removing fund-related dangling images..."
+	@docker images --filter "dangling=true" --filter "reference=fund-*" -q | xargs -r docker rmi || true
 	@echo "Unused images cleaned up!"
 
 clean-volumes: ## Remove unused volumes (WARNING: destroys data)
@@ -146,6 +152,12 @@ clean-all: ## Complete cleanup (WARNING: destroys all data)
 	else \
 		echo "Operation cancelled."; \
 	fi
+
+clean-fund-images: ## Remove all fund-related images (keeps other images)
+	@echo "Removing all fund-related images..."
+	@docker images --filter "reference=fund-*" -q | xargs -r docker rmi -f || true
+	@docker images --filter "dangling=true" --filter "reference=fund-*" -q | xargs -r docker rmi || true
+	@echo "Fund-related images cleaned up!"
 
 # Utility commands
 logs: ## Show logs for all services
@@ -175,6 +187,10 @@ logs-postgres: ## Show PostgreSQL logs
 logs-redis: ## Show Redis logs
 	@echo "Showing Redis logs..."
 	docker compose logs -f redis
+
+logs-celery: ## Show Celery worker logs
+	@echo "Showing Celery worker logs..."
+	docker compose logs -f celery_worker 2>/dev/null || docker compose --profile prod logs -f celery_worker_prod 2>/dev/null || echo "Celery worker not running"
 
 status: ## Show status of all containers
 	@echo "Container Status:"
@@ -219,9 +235,13 @@ restart-frontend: ## Restart frontend service
 	@echo "Restarting frontend..."
 	docker compose restart frontend 2>/dev/null || docker compose --profile prod restart frontend-prod
 
+restart-celery: ## Restart Celery worker service
+	@echo "Restarting Celery worker..."
+	docker compose restart celery_worker 2>/dev/null || docker compose --profile prod restart celery_worker_prod
+
 health: ## Check service health
 	@echo "Checking service health..."
-	@docker compose ps --format "table {{.Name}}\t{{.Status}}" | grep -E "(backend|frontend|postgres|redis)" || echo "Services not running"
+	@docker compose ps --format "table {{.Name}}\t{{.Status}}" | grep -E "(backend|frontend|postgres|redis|celery)" || echo "Services not running"
 	@echo ""
 	@echo "Backend health check:"
 	@curl -s http://localhost:8000/health 2>/dev/null || echo "Backend not responding"
@@ -271,13 +291,21 @@ setup-prod: ## Setup production environment
 # Testing commands
 test: ## Run all tests
 	@echo "Running backend tests..."
-	docker compose exec backend pytest tests/ -v
+	docker compose exec backend pytest app/services/test/ -v --cov=app
 	@echo "Running frontend tests..."
 	docker compose exec frontend npm test
 
 test-backend: ## Run backend tests
 	@echo "Running backend tests..."
-	docker compose exec backend pytest tests/ -v
+	docker compose exec backend pytest app/services/test/ -v --cov=app
+
+test-backend-unit: ## Run backend unit tests only
+	@echo "Running backend unit tests..."
+	docker compose exec backend pytest app/services/test/ -v
+
+test-backend-cov: ## Run backend tests with coverage
+	@echo "Running backend tests with coverage..."
+	docker compose exec backend pytest app/services/test/ --cov=app --cov-report=html --cov-report=term
 
 test-frontend: ## Run frontend tests
 	@echo "Running frontend tests..."
@@ -316,6 +344,10 @@ start-frontend: ## Start frontend service only
 	@echo "Starting frontend..."
 	docker compose --profile dev up -d frontend
 
+start-celery: ## Start Celery worker service only
+	@echo "Starting Celery worker..."
+	docker compose --profile dev up -d celery_worker
+
 stop-postgres: ## Stop PostgreSQL service only
 	@echo "Stopping PostgreSQL..."
 	docker compose stop postgres
@@ -332,6 +364,10 @@ stop-frontend: ## Stop frontend service only
 	@echo "Stopping frontend..."
 	docker compose stop frontend
 
+stop-celery: ## Stop Celery worker service only
+	@echo "Stopping Celery worker..."
+	docker compose stop celery_worker
+
 restart-postgres: ## Restart PostgreSQL service only
 	@echo "Restarting PostgreSQL..."
 	docker compose restart postgres
@@ -339,6 +375,14 @@ restart-postgres: ## Restart PostgreSQL service only
 restart-redis: ## Restart Redis service only
 	@echo "Restarting Redis..."
 	docker compose restart redis
+
+celery-status: ## Show Celery worker status
+	@echo "Checking Celery worker status..."
+	@docker compose exec celery_worker celery -A app.core.celery_app inspect active 2>/dev/null || docker compose --profile prod exec celery_worker_prod celery -A app.core.celery_app inspect active 2>/dev/null || echo "Celery worker not running"
+
+celery-purge: ## Purge all Celery tasks
+	@echo "Purging all Celery tasks..."
+	@docker compose exec celery_worker celery -A app.core.celery_app purge -f 2>/dev/null || docker compose --profile prod exec celery_worker_prod celery -A app.core.celery_app purge -f 2>/dev/null || echo "Celery worker not running"
 
 reset-db: ## Reset database data (keeps tables, removes data only)
 	@echo "Resetting database data while preserving table structure..."

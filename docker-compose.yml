@@ -42,7 +42,7 @@ services:
       target: development
       args:
         BUILDKIT_INLINE_CACHE: 1
-    image: fund-backend:dev
+    image: fund-backend:dev-${BUILDKIT_PROGRESS:-latest}
     container_name: fund-backend
     ports:
       - "8000:8000"
@@ -71,6 +71,35 @@ services:
     profiles:
       - dev
 
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: development
+      args:
+        BUILDKIT_INLINE_CACHE: 1
+    image: fund-backend:dev-${BUILDKIT_PROGRESS:-latest}
+    container_name: fund-celery-worker
+    command: celery -A app.core.celery_app worker --loglevel=info --concurrency=2
+    environment:
+      - DATABASE_URL=postgresql://funduser:fundpass@postgres:5432/funddb
+      - REDIS_URL=redis://redis:6379/0
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4-turbo-preview}
+      - OPENAI_EMBEDDING_MODEL=${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      - UPLOAD_DIR=/app/uploads
+    volumes:
+      - ./backend:/app
+      - ./files:/app/files
+      - backend_uploads:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    profiles:
+      - dev
+
   frontend:
     build:
       context: ./frontend
@@ -78,7 +107,7 @@ services:
       target: development
       args:
         BUILDKIT_INLINE_CACHE: 1
-    image: fund-frontend:dev
+    image: fund-frontend:dev-${BUILDKIT_PROGRESS:-latest}
     container_name: fund-frontend
     ports:
       - "3000:3000"
@@ -102,7 +131,7 @@ services:
       target: production
       args:
         BUILDKIT_INLINE_CACHE: 1
-    image: fund-backend:${TAG:-latest}
+    image: fund-backend:${TAG:-prod-latest}
     container_name: fund-backend-prod
     ports:
       - "8000:8000"
@@ -128,6 +157,33 @@ services:
     profiles:
       - prod
 
+  celery_worker_prod:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: production
+      args:
+        BUILDKIT_INLINE_CACHE: 1
+    image: fund-backend:${TAG:-prod-latest}
+    container_name: fund-celery-worker-prod
+    command: celery -A app.core.celery_app worker --loglevel=warning --concurrency=4
+    environment:
+      - DATABASE_URL=postgresql://funduser:fundpass@postgres:5432/funddb
+      - REDIS_URL=redis://redis:6379/0
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4-turbo-preview}
+      - OPENAI_EMBEDDING_MODEL=${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      - UPLOAD_DIR=/app/uploads
+    volumes:
+      - backend_uploads:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    profiles:
+      - prod
+
   frontend-prod:
     build:
       context: ./frontend
@@ -135,7 +191,7 @@ services:
       target: production
       args:
         BUILDKIT_INLINE_CACHE: 1
-    image: fund-frontend:${TAG:-latest}
+    image: fund-frontend:${TAG:-prod-latest}
     container_name: fund-frontend-prod
     ports:
       - "3000:3000"

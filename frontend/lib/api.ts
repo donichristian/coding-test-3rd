@@ -2,8 +2,11 @@ import axios from 'axios'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
+// Always use localhost for browser requests - Docker networking is handled by port mapping
+const FINAL_API_URL = API_URL
+
 export const api = axios.create({
-  baseURL: API_URL,
+  baseURL: FINAL_API_URL,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -31,7 +34,7 @@ export const documentApi = {
     }
 
     // Use fetch directly for file uploads to avoid axios CORS issues
-    const response = await fetch(`${API_URL}/api/documents/upload`, {
+    const response = await fetch(`${FINAL_API_URL}/api/documents/upload`, {
       method: 'POST',
       body: formData,
       // Don't set Content-Type header - let browser set it with boundary
@@ -96,16 +99,39 @@ export const fundApi = {
   },
 }
 
-// Chat APIs
+// Chat APIs with retry functionality
 export const chatApi = {
-  query: async (query: string, fundId?: number, conversationId?: string, documentId?: number) => {
-    const response = await api.post('/api/chat/query', {
-      query,
-      fund_id: fundId,
-      document_id: documentId,
-      conversation_id: conversationId,
-    })
-    return response.data
+  query: async (query: string, fundId?: number, conversationId?: string, documentId?: number, retryCount: number = 0): Promise<any> => {
+    const maxRetries = 3
+    const baseDelay = 1000 // 1 second
+
+    try {
+      const response = await api.post('/api/chat/query', {
+        query,
+        fund_id: fundId,
+        document_id: documentId,
+        conversation_id: conversationId,
+      })
+      return response.data
+    } catch (error: any) {
+      // Check if it's a network error and we haven't exceeded max retries
+      if (retryCount < maxRetries && (
+        error.code === 'NETWORK_ERROR' ||
+        error.message?.includes('Network Error') ||
+        error.message?.includes('Failed to fetch') ||
+        !error.response // No response means network issue
+      )) {
+        const delay = baseDelay * Math.pow(2, retryCount) // Exponential backoff
+        console.log(`Network error, retrying in ${delay}ms... (attempt ${retryCount + 1}/${maxRetries})`)
+
+        await new Promise(resolve => setTimeout(resolve, delay))
+
+        return chatApi.query(query, fundId, conversationId, documentId, retryCount + 1)
+      }
+
+      // If max retries reached or it's not a network error, throw the error
+      throw error
+    }
   },
   
   createConversation: async (fundId?: number) => {

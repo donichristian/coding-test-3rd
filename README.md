@@ -69,18 +69,16 @@ This repository contains a **project scaffold** to help you get started quickly:
 The following **core functionalities are NOT implemented** and need to be built by you:
 
 #### 1. Document Processing Pipeline (Phase 2) - **CRITICAL**
-- [x] Model pre-loading during Docker build (OCR models cached)
-- [x] PDF parsing with Docling and pdfplumber fallback
-- [x] Table detection and extraction logic
-- [x] Intelligent table classification (capital calls vs distributions vs adjustments)
-- [x] Data validation and cleaning
-- [x] Error handling for malformed PDFs
-- [ ] Background task processing (Celery integration) - Optional enhancement
+- [ ] PDF parsing with Docling and pdfplumber fallback
+- [ ] Table detection and extraction logic
+- [ ] Intelligent table classification (capital calls vs distributions vs adjustments)
+- [ ] Data validation and cleaning
+- [ ] Error handling for malformed PDFs
+- [ ] Background task processing (Celery integration)
 
 **Files implemented:**
 - `backend/app/services/document_processor.py` - Document processing with Docling
 - `backend/app/services/table_parser.py` - Table extraction and classification
-- `backend/preload_models.py` - Model pre-loading script for Docker builds
 
 #### 2. Vector Store & RAG System (Phase 3) - **CRITICAL**
 - [ ] Text chunking strategy implementation

@@ -7,22 +7,24 @@ import { documentApi, fundApi } from "@/lib/api";
 import { formatCurrency } from "@/lib/utils";
 
 export default function UploadPage() {
-  const [uploading, setUploading] = useState(false);
-  const [uploadStatus, setUploadStatus] = useState<{
-    status: "idle" | "uploading" | "processing" | "success" | "error";
-    message?: string;
-    documentId?: number;
-    progress?: number;
-    startTime?: number;
-    elapsedTime?: number;
-    processingResult?: any;
-    extractedData?: {
-      capitalCalls: any[];
-      distributions: any[];
-      adjustments: any[];
-      metrics?: any;
-    };
-  }>({ status: "idle" });
+   const [uploading, setUploading] = useState(false);
+   const [uploadStatus, setUploadStatus] = useState<{
+     status: "idle" | "uploading" | "processing" | "success" | "error";
+     message?: string;
+     documentId?: number;
+     progress?: number;
+     startTime?: number;
+     elapsedTime?: number;
+     processingResult?: any;
+     extractedData?: {
+       capitalCalls: any[];
+       distributions: any[];
+       adjustments: any[];
+       metrics?: any;
+     };
+     retryCount?: number;
+     maxRetries?: number;
+   }>({ status: "idle" });
 
   // Update elapsed time every second during processing
   useEffect(() => {
@@ -41,13 +43,19 @@ export default function UploadPage() {
     return () => clearInterval(interval);
   }, []);
 
-  const onDrop = useCallback(async (acceptedFiles: File[]) => {
+  const onDrop = useCallback(async (acceptedFiles: File[], retryCount = 0) => {
     if (acceptedFiles.length === 0) return;
 
     const file = acceptedFiles[0];
+    const maxRetries = 3;
 
     setUploading(true);
-    setUploadStatus({ status: "uploading", message: "Uploading file..." });
+    setUploadStatus({
+      status: "uploading",
+      message: retryCount > 0 ? `Retrying upload... (attempt ${retryCount + 1}/${maxRetries + 1})` : "Uploading file...",
+      retryCount,
+      maxRetries
+    });
 
     try {
       const result = await documentApi.upload(file);
@@ -58,20 +66,45 @@ export default function UploadPage() {
         documentId: result.document_id,
         progress: 10,
         startTime: Date.now(),
+        retryCount,
+        maxRetries
       });
 
       // Poll for status
-      pollDocumentStatus(result.document_id);
+      pollDocumentStatus(result.document_id, retryCount);
     } catch (error: any) {
-      setUploadStatus({
-        status: "error",
-        message: error.response?.data?.detail || "Upload failed",
-      });
-      setUploading(false);
+      const isNetworkError = !error.response || error.code === 'NETWORK_ERROR' || error.code === 'ECONNABORTED';
+      const isRetryableError = isNetworkError || error.response?.status >= 500;
+
+      if (isRetryableError && retryCount < maxRetries) {
+        const delay = Math.min(1000 * Math.pow(2, retryCount), 10000); // Exponential backoff, max 10s
+        console.log(`Upload failed, retrying in ${delay}ms... (attempt ${retryCount + 1}/${maxRetries + 1})`);
+
+        setUploadStatus({
+          status: "uploading",
+          message: `Upload failed, retrying in ${Math.ceil(delay / 1000)}s... (attempt ${retryCount + 1}/${maxRetries + 1})`,
+          retryCount: retryCount + 1,
+          maxRetries
+        });
+
+        setTimeout(() => {
+          onDrop(acceptedFiles, retryCount + 1);
+        }, delay);
+      } else {
+        setUploadStatus({
+          status: "error",
+          message: retryCount > 0
+            ? `Upload failed after ${retryCount + 1} attempts: ${error.response?.data?.detail || error.message || "Unknown error"}`
+            : error.response?.data?.detail || "Upload failed",
+          retryCount,
+          maxRetries
+        });
+        setUploading(false);
+      }
     }
   }, []);
 
-  const pollDocumentStatus = async (documentId: number) => {
+  const pollDocumentStatus = async (documentId: number, retryCount = 0) => {
     const maxAttempts = 60; // 5 minutes max (reduced from 10 minutes)
     let attempts = 0;
 
@@ -135,7 +168,9 @@ export default function UploadPage() {
                 uploadDate: documentDetails.upload_date,
                 parsingStatus: documentDetails.parsing_status,
               },
-              extractedData: extractedData || undefined
+              extractedData: extractedData || undefined,
+              retryCount,
+              maxRetries: 3
             });
           } catch (error) {
             setUploadStatus({
@@ -143,6 +178,8 @@ export default function UploadPage() {
               message: "Document processed successfully!",
               documentId,
               progress: 100,
+              retryCount,
+              maxRetries: 3
             });
           }
           setUploading(false);
@@ -151,6 +188,8 @@ export default function UploadPage() {
             status: "error",
             message: status.error_message || "Processing failed",
             documentId,
+            retryCount,
+            maxRetries: 3
           });
           setUploading(false);
         } else if (attempts < maxAttempts) {
@@ -172,16 +211,39 @@ export default function UploadPage() {
             message:
               "Processing timeout - document processing should complete quickly (models are pre-loaded)",
             documentId,
+            retryCount,
+            maxRetries: 3
           });
           setUploading(false);
         }
-      } catch (error) {
-        setUploadStatus({
-          status: "error",
-          message: "Failed to check status",
-          documentId,
-        });
-        setUploading(false);
+      } catch (error: any) {
+        const isNetworkError = !error.response || error.code === 'NETWORK_ERROR' || error.code === 'ECONNABORTED';
+        const isRetryableError = isNetworkError || error.response?.status >= 500;
+
+        if (isRetryableError && retryCount < 3) {
+          const delay = Math.min(2000 * Math.pow(2, retryCount), 15000); // Exponential backoff, max 15s
+          console.log(`Status check failed, retrying in ${delay}ms... (attempt ${retryCount + 1}/4)`);
+
+          setUploadStatus((prev) => ({
+            ...prev,
+            message: `Connection lost, retrying in ${Math.ceil(delay / 1000)}s... (attempt ${retryCount + 1}/4)`,
+          }));
+
+          setTimeout(() => {
+            pollDocumentStatus(documentId, retryCount + 1);
+          }, delay);
+        } else {
+          setUploadStatus({
+            status: "error",
+            message: retryCount > 0
+              ? `Failed to check status after ${retryCount + 1} attempts: ${error.message || "Network error"}`
+              : "Failed to check status",
+            documentId,
+            retryCount,
+            maxRetries: 3
+          });
+          setUploading(false);
+        }
       }
     };
 
@@ -189,7 +251,7 @@ export default function UploadPage() {
   };
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop,
+    onDrop: (acceptedFiles: File[]) => onDrop(acceptedFiles),
     accept: {
       "application/pdf": [".pdf"],
     },
@@ -326,8 +388,13 @@ export default function UploadPage() {
                             Elapsed: {uploadStatus.elapsedTime}s
                           </span>
                         )}
+                        {uploadStatus.retryCount !== undefined && uploadStatus.retryCount > 0 && (
+                          <span className="block text-xs mt-1 text-orange-600">
+                            Retry: {uploadStatus.retryCount}/{uploadStatus.maxRetries || 3}
+                          </span>
+                        )}
                       </p>
-                      <div className="mt-3 flex justify-center">
+                      <div className="mt-3 flex justify-center gap-2">
                         <button
                           onClick={() => {
                             setUploadStatus({ status: "idle" });
@@ -337,6 +404,19 @@ export default function UploadPage() {
                         >
                           Cancel Processing
                         </button>
+                        {uploadStatus.retryCount !== undefined && uploadStatus.retryCount > 0 && (
+                          <button
+                            onClick={() => {
+                              // Retry the current operation
+                              if (uploadStatus.documentId) {
+                                pollDocumentStatus(uploadStatus.documentId, uploadStatus.retryCount);
+                              }
+                            }}
+                            className="px-4 py-2 bg-orange-600 text-white rounded-md hover:bg-orange-700 transition text-sm"
+                          >
+                            Retry Now
+                          </button>
+                        )}
                       </div>
                     </div>
                   )}
@@ -412,6 +492,9 @@ export default function UploadPage() {
                                 let displayValue: string;
                                 if (typeof value === 'number' && key.toLowerCase().includes('irr')) {
                                   displayValue = `${value.toFixed(2)}%`;
+                                } else if (typeof value === 'number' && key.toLowerCase() === 'dpi') {
+                                  // DPI is a ratio (0.3598), display as percentage (35.98%)
+                                  displayValue = `${(value * 100).toFixed(2)}%`;
                                 } else if (typeof value === 'number') {
                                   displayValue = formatCurrency(value);
                                 } else {
@@ -505,9 +588,9 @@ export default function UploadPage() {
                                       <td className="px-4 py-2">{dist.distribution_type || 'N/A'}</td>
                                       <td className="px-4 py-2">
                                         {dist.is_recallable ? (
-                                          <span className="text-orange-600">Yes</span>
+                                          <span className="text-green-600">Yes</span>
                                         ) : (
-                                          <span className="text-green-600">No</span>
+                                          <span className="text-orange-600">No</span>
                                         )}
                                       </td>
                                     </tr>

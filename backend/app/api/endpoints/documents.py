@@ -17,6 +17,7 @@ from app.schemas.document import (
 )
 from app.services.document_processor import DocumentProcessor
 from app.core.config import settings
+from app.tasks.document_tasks import process_document_task
 from sqlalchemy import text
 
 router = APIRouter()
@@ -68,86 +69,16 @@ async def upload_document(
     db.commit()
     db.refresh(document)
     
-    # Start background processing
-    background_tasks.add_task(
-        process_document_task,
-        document.id,
-        file_path,
-        fund_id  # Pass the actual fund_id (could be None)
-    )
-    
+    # Start background processing with Celery
+    task = process_document_task.delay(document.id, file_path, fund_id)
+
     return {
         "document_id": document.id,
-        "task_id": None,
+        "task_id": task.id,
         "status": "pending",
-        "message": "Document uploaded successfully. Processing started."
+        "message": "Document uploaded successfully. Processing started in background."
     }
 
-
-async def process_document_task(document_id: int, file_path: str, fund_id: int = None):
-    """Background task to process document"""
-    from app.db.session import SessionLocal
-    import asyncio
-    import time
-
-    db = SessionLocal()
-
-    try:
-        # Update status to processing
-        document = db.query(Document).filter(Document.id == document_id).first()
-        document.parsing_status = "processing"
-        db.commit()
-
-        start_time = time.time()
-        print(f"Starting background document processing for document {document_id} with fund_id: {fund_id}")
-
-        # If no fund_id provided, create a default fund or use existing one
-        if fund_id is None:
-            # Try to find an existing fund, or create a default one
-            from app.models.fund import Fund
-            default_fund = db.query(Fund).filter(Fund.name == "Default Fund").first()
-            if not default_fund:
-                default_fund = Fund(name="Default Fund", gp_name="Default GP")
-                db.add(default_fund)
-                db.commit()
-                db.refresh(default_fund)
-            fund_id = default_fund.id
-            print(f"Using default fund_id: {fund_id}")
-
-        # Update document with fund_id
-        document.fund_id = fund_id
-        db.commit()
-
-        # Process document
-        processor = DocumentProcessor()
-        result = await processor.process_document(file_path, document_id, fund_id)
-
-        processing_time = time.time() - start_time
-        print(f"Document processing completed in {processing_time:.2f}s for document {document_id}")
-
-        # Update status
-        if result["status"] == "success":
-            document.parsing_status = "completed"
-        else:
-            document.parsing_status = "failed"
-            document.error_message = result.get("error", "Processing failed")
-        db.commit()
-
-        print(f"Document {document_id} processing status updated to: {document.parsing_status}")
-
-    except Exception as e:
-        print(f"Error processing document {document_id}: {e}")
-        import traceback
-        traceback.print_exc()
-        try:
-            document = db.query(Document).filter(Document.id == document_id).first()
-            document.parsing_status = "failed"
-            document.error_message = str(e)
-            db.commit()
-        except Exception as db_error:
-            print(f"Error updating document status: {db_error}")
-    finally:
-        db.close()
 
 
 @router.get("/{document_id}/status", response_model=DocumentStatus)

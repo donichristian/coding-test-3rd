@@ -72,12 +72,21 @@ class MetricsCalculator:
         """
         pic = self.calculate_pic(fund_id)
         total_distributions = self.calculate_total_distributions(fund_id)
-        
+
+        print(f"DEBUG DPI: PIC = {pic}, Total Distributions = {total_distributions}")
+
         if not pic or pic == 0:
+            print("DEBUG DPI: PIC is 0 or None, returning 0.0")
             return 0.0
-        
+
+        if not total_distributions or total_distributions == 0:
+            print("DEBUG DPI: Total distributions is 0 or None, returning 0.0")
+            return 0.0
+
         dpi = float(total_distributions) / float(pic)
-        return round(dpi, 4)
+        result = round(dpi, 4)
+        print(f"DEBUG DPI: {total_distributions} / {pic} = {result}")
+        return result
     
     def calculate_irr(self, fund_id: int) -> Optional[float]:
         """
