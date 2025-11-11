@@ -31,33 +31,33 @@ async def upload_document(
     db: Session = Depends(get_db)
 ):
     """Upload and process a PDF document"""
-    
+
     # Validate file type
     if not file.filename.endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
-    
+
     # Validate file size
     file.file.seek(0, 2)
     file_size = file.file.tell()
     file.file.seek(0)
-    
+
     if file_size > settings.MAX_UPLOAD_SIZE:
         raise HTTPException(
-            status_code=400, 
+            status_code=400,
             detail=f"File size exceeds maximum allowed size of {settings.MAX_UPLOAD_SIZE} bytes"
         )
-    
+
     # Create upload directory if it doesn't exist
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
-    
+
     # Save file
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"{timestamp}_{file.filename}"
     file_path = os.path.join(settings.UPLOAD_DIR, filename)
-    
+
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
-    
+
     # Create document record
     document = Document(
         fund_id=fund_id,
@@ -68,9 +68,9 @@ async def upload_document(
     db.add(document)
     db.commit()
     db.refresh(document)
-    
+
     # Start background processing with Celery
-    task = process_document_task.delay(document.id, file_path, fund_id)
+    task = process_document_task.delay(document.id, file_path, fund_id or 1)  # Default fund_id if not provided
 
     return {
         "document_id": document.id,

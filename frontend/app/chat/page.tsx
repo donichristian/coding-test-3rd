@@ -4,6 +4,7 @@ import { useState, useRef, useEffect } from 'react'
 import { Send, Loader2, FileText, File } from 'lucide-react'
 import { chatApi, documentApi } from '@/lib/api'
 import { formatCurrency } from '@/lib/utils'
+import { AIResponseFormatter } from '@/components/AIResponseFormatter'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -25,6 +26,7 @@ interface SourceDocument {
   chunk_index?: number
   confidence_score?: number
   citation_text?: string
+  is_complete?: boolean
 }
 
 interface Document {
@@ -32,6 +34,7 @@ interface Document {
   file_name: string
   parsing_status: string
   fund_id?: number
+  upload_date?: string
 }
 
 export default function ChatPage() {
@@ -168,7 +171,7 @@ export default function ChatPage() {
               <option value="">General questions (no specific document)</option>
               {documents.map((doc) => (
                 <option key={doc.id} value={doc.id}>
-                  {doc.file_name} {doc.parsing_status === 'completed' ? '✅' : doc.parsing_status === 'processing' ? '⏳' : '❌'}
+                  {doc.file_name} ({doc.upload_date ? new Date(doc.upload_date).toLocaleString() : 'Unknown date'}) - {doc.parsing_status}
                 </option>
               ))}
             </select>
@@ -302,7 +305,11 @@ function MessageBubble({ message, onRetry, isLoading }: {
               : 'bg-gray-100 text-gray-900'
           }`}
         >
-          <p className="whitespace-pre-wrap">{message.content}</p>
+          {isUser ? (
+            <p className="whitespace-pre-wrap">{message.content}</p>
+          ) : (
+            <AIResponseFormatter content={message.content} />
+          )}
           {message.canRetry && message.originalQuery && onRetry && (
             <div className="mt-3 pt-3 border-t border-red-200">
               <button
@@ -354,7 +361,7 @@ function MessageBubble({ message, onRetry, isLoading }: {
               <div className="px-4 py-3 space-y-3 border-t">
                 {message.sources.slice(0, 3).map((source: SourceDocument, idx) => (
                   <div key={idx} className="text-xs bg-gray-50 p-3 rounded border">
-                    {/* Enhanced Citation Header */}
+                    {/* Clean Citation Header */}
                     <div className="flex items-center justify-between mb-2">
                       <div className="flex items-center space-x-2">
                         <FileText className="w-3 h-3 text-blue-600" />
@@ -370,21 +377,23 @@ function MessageBubble({ message, onRetry, isLoading }: {
                     </div>
 
                     {/* Source Content */}
-                    <p className="text-gray-700 line-clamp-3 mb-2">{source.content}</p>
+                    <div className="text-gray-700 mb-2">
+                      <AIResponseFormatter
+                        content={source.content}
+                        className="text-xs prose-xs"
+                      />
+                    </div>
 
-                    {/* Metadata */}
+                    {/* Clean Metadata */}
                     <div className="flex items-center justify-between text-gray-500">
                       <div className="flex items-center space-x-3">
                         {source.page_number && (
                           <span>Page {source.page_number}</span>
                         )}
-                        {source.chunk_index !== undefined && (
-                          <span>Section {source.chunk_index + 1}</span>
+                        {source.score && (
+                          <span>Relevance: {(source.score * 100).toFixed(0)}%</span>
                         )}
                       </div>
-                      {source.score && (
-                        <span>Relevance: {(source.score * 100).toFixed(0)}%</span>
-                      )}
                     </div>
                   </div>
                 ))}

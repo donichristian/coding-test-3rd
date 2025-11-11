@@ -203,29 +203,55 @@ class ContextFormatter:
                     context_parts.append(f"- {key}: {value}")
             context_parts.append("")
 
-        # Add retrieved document chunks (limit to avoid token limits)
+        # Add retrieved document chunks with clean citations
         if retrieved_docs:
             context_parts.append("Relevant Document Information:")
             for i, doc in enumerate(retrieved_docs[:3], 1):  # Limit to top 3
                 content = doc.get("content", "").strip()
                 if content and len(content) < 1000:  # Reasonable chunk size
-                    # Add enhanced citation information if available
+                    # Create clean citation without chunk details
                     metadata = doc.get("metadata", {})
-                    doc_name = metadata.get("document_name", f"Document {i}")
-                    page_num = metadata.get("page_number")
-                    chunk_idx = metadata.get("chunk_index")
-
-                    citation = f"{doc_name}"
-                    if page_num:
-                        citation += f", page {page_num}"
-                    if chunk_idx is not None:
-                        citation += f" (chunk {chunk_idx})"
+                    citation = ContextFormatter._create_clean_citation(metadata)
 
                     context_parts.append(f"Source: {citation}")
                     context_parts.append(content)
                     context_parts.append("")
 
         return "\n".join(context_parts)
+
+    @staticmethod
+    def _create_clean_citation(metadata: Dict[str, Any]) -> str:
+        """Create user-friendly citation without internal chunk details."""
+        parts = []
+
+        # Document name (always include if available, fallback to database lookup)
+        doc_name = metadata.get("document_name")
+        if not doc_name and metadata.get("document_id"):
+            # Try to get document name from database
+            try:
+                from app.models.document import Document
+                from app.db.session import SessionLocal
+                db = SessionLocal()
+                doc_record = db.query(Document).filter(Document.id == metadata["document_id"]).first()
+                if doc_record:
+                    doc_name = doc_record.file_name
+                db.close()
+            except Exception as e:
+                logger.warning(f"Could not retrieve document name for ID {metadata.get('document_id')}: {e}")
+
+        if doc_name:
+            parts.append(doc_name)
+
+        # Page number (most useful for users)
+        if page_num := metadata.get("page_number"):
+            parts.append(f"page {page_num}")
+
+        # Section title if available and meaningful
+        if section := metadata.get("section_title"):
+            if len(section) < 50:  # Avoid overly long section names
+                parts.append(f"section: {section}")
+
+        return ", ".join(parts) if parts else "Unknown Source"
     
 class ResponseGenerator:
     """Class responsible for generating responses using LLM."""
@@ -426,19 +452,41 @@ class LLMFactory:
 
 class RAGEngine:
     """RAG engine for fund performance Q&A using LangChain"""
-    
+
+    # Shared singleton instances to prevent model reloading
+    _shared_vector_store: Optional[VectorStore] = None
+    _shared_metrics_provider: Optional[MetricsProvider] = None
+    _shared_llm_provider: Optional[LLMProvider] = None
+
     def __init__(
         self,
         vector_store: Optional[VectorStore] = None,
         metrics_calculator: Optional[MetricsCalculator] = None,
         llm_provider: Optional[LLMProvider] = None
     ):
-        # Dependency injection with defaults
-        self.vector_store = vector_store or VectorStore()
-        self.metrics_provider = MetricsProvider(metrics_calculator or MetricsCalculator(SessionLocal()))
-        self.llm_provider = llm_provider or LLMFactory.create_llm()
-        
-        # Component initialization
+        # Use shared instances to prevent model reloading on each query
+        if vector_store is not None:
+            self.vector_store = vector_store
+        else:
+            if RAGEngine._shared_vector_store is None:
+                RAGEngine._shared_vector_store = VectorStore()
+            self.vector_store = RAGEngine._shared_vector_store
+
+        if metrics_calculator is not None:
+            self.metrics_provider = MetricsProvider(metrics_calculator)
+        else:
+            if RAGEngine._shared_metrics_provider is None:
+                RAGEngine._shared_metrics_provider = MetricsProvider(MetricsCalculator(SessionLocal()))
+            self.metrics_provider = RAGEngine._shared_metrics_provider
+
+        if llm_provider is not None:
+            self.llm_provider = llm_provider
+        else:
+            if RAGEngine._shared_llm_provider is None:
+                RAGEngine._shared_llm_provider = LLMFactory.create_llm()
+            self.llm_provider = RAGEngine._shared_llm_provider
+
+        # Component initialization (create fresh instances for thread safety)
         self.intent_classifier = IntentClassifier()
         self.context_retriever = ContextRetriever(self.vector_store)
         self.context_formatter = ContextFormatter()
@@ -563,42 +611,51 @@ class RAGEngine:
 
     def _format_sources_with_citations(self, retrieved_docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Format retrieved documents with enhanced citation information.
+        Format retrieved documents with user-friendly citation information.
 
         Args:
             retrieved_docs: Raw retrieved documents
 
         Returns:
-            List of formatted source documents with citations
+            List of formatted source documents with clean citations
         """
         formatted_sources = []
 
-        for i, doc in enumerate(retrieved_docs[:5], 1):  # Limit to top 5 sources
+        for doc in retrieved_docs[:5]:  # Limit to top 5 sources
             metadata = doc.get("metadata", {})
 
-            # Extract citation information
-            document_name = metadata.get("document_name", f"Document {i}")
-            page_number = metadata.get("page_number")
-            chunk_index = metadata.get("chunk_index")
-            confidence_score = doc.get("score", 0.0)
+            # Get document name from metadata, fallback to database lookup if needed
+            document_name = metadata.get("document_name")
+            if not document_name and metadata.get("document_id"):
+                # Try to get document name from database
+                try:
+                    from app.models.document import Document
+                    from app.db.session import SessionLocal
+                    db = SessionLocal()
+                    doc_record = db.query(Document).filter(Document.id == metadata["document_id"]).first()
+                    if doc_record:
+                        document_name = doc_record.file_name
+                    db.close()
+                except Exception as e:
+                    logger.warning(f"Could not retrieve document name for ID {metadata.get('document_id')}: {e}")
 
-            # Build citation text
-            citation_parts = [document_name]
-            if page_number:
-                citation_parts.append(f"page {page_number}")
-            if chunk_index is not None:
-                citation_parts.append(f"section {chunk_index + 1}")
+            # Create clean citation for user display
+            citation_parts = []
+            if document_name:
+                citation_parts.append(document_name)
+            if page_num := metadata.get("page_number"):
+                citation_parts.append(f"page {page_num}")
 
-            citation_text = ", ".join(citation_parts)
+            citation_text = ", ".join(citation_parts) if citation_parts else "Unknown Source"
 
             formatted_source = {
                 "content": doc.get("content", "").strip(),
                 "metadata": metadata,
-                "score": confidence_score,
+                "score": doc.get("score", 0.0),
                 "document_name": document_name,
-                "page_number": page_number,
-                "chunk_index": chunk_index,
-                "confidence_score": confidence_score,
+                "page_number": metadata.get("page_number"),
+                # Remove chunk_index from user-facing data
+                "confidence_score": doc.get("score", 0.0),
                 "citation_text": citation_text
             }
 

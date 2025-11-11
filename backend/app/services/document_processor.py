@@ -174,43 +174,354 @@ class DocumentExtractor:
             }
 
 class TextChunker:
-    """Responsible for chunking text content."""
-    
+    """Responsible for chunking text content with semantic awareness."""
+
     def __init__(self, chunk_size: int = 500, chunk_overlap: int = 20):
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
-    
+
     def chunk_text(self, text_content: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Chunk text content into manageable pieces."""
+        """Chunk text content into manageable pieces with semantic awareness."""
         chunks = []
-        
+
         for item in text_content:
             content = item["content"]
-            
+
             if len(content) <= self.chunk_size:
-                # Single chunk
+                # Single chunk - no need to split
                 chunks.append({
                     "content": content,
                     "metadata": {
                         "page": item["page"],
                         "type": item["type"],
-                        "chunk_index": 0
+                        "chunk_index": 0,
+                        "is_complete": True
                     }
                 })
             else:
-                # Multiple chunks with overlap
-                for i in range(0, len(content), self.chunk_size - self.chunk_overlap):
-                    chunk_content = content[i:i + self.chunk_size]
+                # Multiple chunks with semantic splitting
+                semantic_chunks = self._split_semantic_chunks(content, self.chunk_size, self.chunk_overlap)
+
+                for i, chunk_content in enumerate(semantic_chunks):
                     chunks.append({
                         "content": chunk_content,
                         "metadata": {
                             "page": item["page"],
                             "type": item["type"],
-                            "chunk_index": len(chunks)
+                            "chunk_index": len(chunks),
+                            "is_complete": self._is_complete_chunk(chunk_content)
                         }
                     })
-        
+
         return chunks
+
+    def _split_semantic_chunks(self, text: str, chunk_size: int, overlap: int) -> List[str]:
+        """Split text into semantic chunks, preferring to break at natural boundaries."""
+        if len(text) <= chunk_size:
+            return [text]
+
+        # First, identify table sections and treat them as atomic units
+        table_sections = self._identify_table_sections(text)
+
+        if not table_sections:
+            # No tables detected, use regular semantic chunking
+            return self._chunk_regular_text(text, chunk_size, overlap)
+
+        # Handle text with tables
+        return self._chunk_text_with_tables(text, table_sections, chunk_size, overlap)
+
+    def _identify_table_sections(self, text: str) -> List[tuple[int, int]]:
+        """Identify table sections in the text and return their start/end positions."""
+        sections = []
+        lines = text.split('\n')
+
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+
+            # Look for table patterns (multiple pipes, or structured data)
+            if self._is_table_line(line):
+                table_start = text.find(line, text.find('\n', text.find(lines[i-1]) if i > 0 else 0) + 1 if i > 0 else 0)
+
+                # Find the end of the table
+                table_end = table_start + len(line)
+                j = i + 1
+
+                while j < len(lines):
+                    next_line = lines[j].strip()
+                    if self._is_table_line(next_line) or (next_line and not next_line[0].isupper() and '|' in next_line):
+                        table_end = text.find(next_line, table_end) + len(next_line)
+                        j += 1
+                    else:
+                        break
+
+                if table_end > table_start:
+                    sections.append((table_start, table_end))
+                    i = j
+                else:
+                    i += 1
+            else:
+                i += 1
+
+        return sections
+
+    def _is_table_line(self, line: str) -> bool:
+        """Check if a line appears to be part of a table."""
+        if not line:
+            return False
+
+        # Count pipes
+        pipe_count = line.count('|')
+
+        # Check for structured data patterns
+        if pipe_count >= 2:
+            return True
+
+        # Check for tab-separated values
+        if '\t' in line and len(line.split('\t')) >= 3:
+            return True
+
+        # Check for aligned columns (multiple spaces separating data)
+        parts = line.split()
+        if len(parts) >= 4 and any(len(part) > 10 for part in parts):
+            return True
+
+        return False
+
+    def _chunk_text_with_tables(self, text: str, table_sections: List[tuple[int, int]], chunk_size: int, overlap: int) -> List[str]:
+        """Chunk text that contains tables, treating tables as atomic units."""
+        chunks = []
+        start = 0
+
+        for table_start, table_end in table_sections:
+            # Handle text before the table
+            if start < table_start:
+                pre_table_text = text[start:table_start].strip()
+                if pre_table_text:
+                    # Chunk the pre-table text
+                    pre_chunks = self._chunk_regular_text(pre_table_text, chunk_size, overlap)
+                    chunks.extend(pre_chunks)
+
+            # Add the entire table as one chunk (if it fits)
+            table_text = text[table_start:table_end].strip()
+            if len(table_text) <= chunk_size:
+                chunks.append(table_text)
+            else:
+                # If table is too large, split it at row boundaries
+                table_chunks = self._chunk_table(table_text, chunk_size, overlap)
+                chunks.extend(table_chunks)
+
+            start = table_end
+
+        # Handle remaining text after the last table
+        if start < len(text):
+            remaining_text = text[start:].strip()
+            if remaining_text:
+                remaining_chunks = self._chunk_regular_text(remaining_text, chunk_size, overlap)
+                chunks.extend(remaining_chunks)
+
+        return chunks
+
+    def _chunk_table(self, table_text: str, chunk_size: int, overlap: int) -> List[str]:
+        """Split a large table into chunks at row boundaries."""
+        lines = table_text.split('\n')
+        chunks = []
+
+        current_chunk = []
+        current_size = 0
+
+        for line in lines:
+            line_size = len(line) + 1  # +1 for newline
+
+            if current_size + line_size > chunk_size and current_chunk:
+                # Save current chunk
+                chunk_text = '\n'.join(current_chunk)
+                if chunk_text.strip():
+                    chunks.append(chunk_text)
+
+                # Start new chunk with overlap (keep last few lines)
+                overlap_lines = min(len(current_chunk), 2)  # Keep up to 2 lines for overlap
+                current_chunk = current_chunk[-overlap_lines:] if overlap_lines > 0 else []
+                current_size = sum(len(line) + 1 for line in current_chunk)
+
+            current_chunk.append(line)
+            current_size += line_size
+
+        # Add the last chunk
+        if current_chunk:
+            chunk_text = '\n'.join(current_chunk)
+            if chunk_text.strip():
+                chunks.append(chunk_text)
+
+        return chunks
+
+    def _chunk_regular_text(self, text: str, chunk_size: int, overlap: int) -> List[str]:
+        """Chunk regular (non-table) text using semantic boundaries."""
+        if len(text) <= chunk_size:
+            return [text]
+
+        chunks = []
+        start = 0
+
+        while start < len(text):
+            end = start + chunk_size
+
+            if end >= len(text):
+                chunk_text = text[start:].strip()
+                if chunk_text:
+                    chunks.append(chunk_text)
+                break
+
+            # Try to find a good breaking point within the last 30% of the chunk
+            break_search_start = max(start + int(chunk_size * 0.7), start)
+            break_pos = self._find_semantic_break(text, break_search_start, end)
+
+            if break_pos > start:
+                chunk_text = text[start:break_pos].strip()
+                if chunk_text:
+                    chunks.append(chunk_text)
+                start = break_pos
+            else:
+                # No good break point found, force break at a reasonable position
+                fallback_end = self._find_fallback_break(text, start, end)
+                chunk_text = text[start:fallback_end].strip()
+                if chunk_text:
+                    chunks.append(chunk_text)
+                start = max(fallback_end - overlap, start + 50)
+
+    def _find_fallback_break(self, text: str, start: int, end: int) -> int:
+        """Find a fallback breaking point when no semantic break is found."""
+        # Look for whitespace characters in reverse order
+        for i in range(end - 1, start - 1, -1):
+            if text[i].isspace():
+                return i + 1  # Include the whitespace
+
+        # If no whitespace found, break at a word boundary if possible
+        for i in range(end - 1, max(start, end - 20), -1):
+            if not text[i].isalnum() and text[i] not in ['_', '-']:
+                return i
+
+        # Last resort: break exactly at chunk_size
+        return end
+
+    def _find_semantic_break(self, text: str, search_start: int, search_end: int) -> int:
+        """Find the best semantic breaking point in the text."""
+        # Define semantic break patterns in order of preference
+        break_patterns = [
+            r'\n\s*\n',  # Double newlines (paragraph breaks)
+            r'(?<=\.)\s+(?=[A-Z])',  # Period followed by capital letter (sentence end)
+            r'(?<=\!|\?)\s+',  # Exclamation/question marks
+            r'\n',  # Single newlines
+            r'(?<=\;|\:)\s+',  # Semicolon/colon
+            r'\s+',  # Whitespace (last resort)
+        ]
+
+        # Search backwards from search_end to find the best break
+        for pattern in break_patterns:
+            import re
+            matches = list(re.finditer(pattern, text[search_start:search_end]))
+            if matches:
+                # Take the last (rightmost) match
+                match = matches[-1]
+                return search_start + match.end()
+
+        return -1  # No suitable break found
+
+    def _is_complete_chunk(self, chunk_text: str) -> bool:
+        """Determine if a chunk appears to be complete (not cut off mid-sentence/table)."""
+        if not chunk_text or len(chunk_text.strip()) == 0:
+            return False
+
+        text = chunk_text.strip()
+
+        # Check for incomplete sentences (ends with incomplete words or punctuation)
+        if text.endswith(('...', '…', 'etc.', 'i.e.', 'e.g.', 'vs.', 'cf.', 'Dr.', 'Mr.', 'Mrs.', 'Ms.')):
+            return False
+
+        # Check for table-like content that might be cut off
+        lines = text.split('\n')
+        if len(lines) > 1:
+            # Check if it looks like a table (multiple | separators)
+            pipe_count = text.count('|')
+            if pipe_count >= 4:  # Likely a table
+                # For tables, check if we have complete rows
+                table_lines = [line for line in lines if line.strip() and '|' in line]
+                if len(table_lines) > 1:  # Has header + at least one data row
+                    # Check if the table looks complete (has balanced structure)
+                    first_row_pipes = table_lines[0].count('|')
+                    last_row_pipes = table_lines[-1].count('|')
+                    if abs(first_row_pipes - last_row_pipes) > 1:  # Significant imbalance
+                        return False
+                else:
+                    # Single table line, might be incomplete
+                    return False
+
+        # Check for incomplete parentheses/brackets
+        if text.count('(') > text.count(')') or text.count('[') > text.count(']'):
+            return False
+
+        # Check for trailing punctuation that suggests incompleteness
+        if text.endswith(('.', '!', '?', ':', ';', ',')):
+            return True
+        elif text.endswith(('-', '–', '—')):
+            return False
+
+        # Additional check: if text ends with a word that's cut off
+        words = text.split()
+        if words and len(words[-1]) < 3 and not any(words[-1].endswith(punct) for punct in '.!?,;:'):
+            return False
+
+        return True
+
+    def post_process_chunks(self, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Post-process chunks to improve readability and completeness."""
+        processed_chunks = []
+
+        for chunk in chunks:
+            content = chunk["content"]
+            metadata = chunk["metadata"]
+
+            # Clean up table formatting
+            if '|' in content and '\n' in content:
+                content = self._clean_table_formatting(content)
+
+            # Add continuation markers for incomplete chunks
+            if not metadata.get("is_complete", True):
+                content = self._add_continuation_marker(content)
+
+            # Update the chunk
+            processed_chunk = chunk.copy()
+            processed_chunk["content"] = content
+            processed_chunks.append(processed_chunk)
+
+        return processed_chunks
+
+    def _clean_table_formatting(self, content: str) -> str:
+        """Clean up table formatting for better readability."""
+        lines = content.split('\n')
+        cleaned_lines = []
+
+        for line in lines:
+            line = line.strip()
+            if line:
+                # Ensure consistent spacing around pipes
+                line = re.sub(r'\s*\|\s*', ' | ', line)
+                line = re.sub(r'^\s*\|\s*', '', line)  # Remove leading pipe
+                line = re.sub(r'\s*\|\s*$', '', line)  # Remove trailing pipe
+                # Clean up multiple spaces
+                line = re.sub(r'\s+', ' ', line)
+                cleaned_lines.append(line)
+
+        return '\n'.join(cleaned_lines)
+
+    def _add_continuation_marker(self, content: str) -> str:
+        """Add a continuation marker to incomplete chunks."""
+        if content.endswith(('...', '…')):
+            return content  # Already has continuation marker
+        elif content.endswith(('.', '!', '?', ':', ';')):
+            return content + " [continued...]"
+        else:
+            return content + "... [continued]"
     
 class DataStorer:
     """Responsible for storing data in databases."""
@@ -563,6 +874,7 @@ class DocumentProcessor:
 
             # Process text synchronously
             text_chunks = self.text_chunker.chunk_text(text_content)
+            text_chunks = self.text_chunker.post_process_chunks(text_chunks)
 
             # Store data synchronously using synchronous database operations
             chunks_stored = self._store_chunks_sync(text_chunks, document_id, fund_id)
@@ -696,7 +1008,6 @@ class DocumentProcessor:
         """Store table data directly using SQLAlchemy synchronously."""
         from app.db.session import SessionLocal
         from app.models.transaction import CapitalCall, Distribution, Adjustment
-        from app.services.data_parser import DataParser
         import json
 
         stored_count = 0

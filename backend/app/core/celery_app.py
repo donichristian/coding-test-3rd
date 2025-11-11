@@ -52,8 +52,24 @@ def preload_models_on_worker_init(sender, **kwargs):
         try:
             from sentence_transformers import SentenceTransformer
             logger.info("Loading sentence-transformers model...")
-            _model_cache['sentence_transformers'] = SentenceTransformer('all-MiniLM-L6-v2')
-            logger.info("✓ Sentence-transformers model loaded successfully")
+
+            # Check if model is already cached from Docker build
+            import os
+            model_path = os.path.expanduser("~/.cache/torch/sentence_transformers/all-MiniLM-L6-v2")
+            if os.path.exists(model_path):
+                logger.info("✓ Using pre-cached sentence-transformers model from Docker build")
+            else:
+                logger.info("Downloading sentence-transformers model...")
+
+            model = SentenceTransformer('all-MiniLM-L6-v2')
+
+            # Test the model to ensure it's working
+            test_embedding = model.encode("test sentence")
+            if test_embedding is not None and len(test_embedding) == 384:
+                _model_cache['sentence_transformers'] = model
+                logger.info("✓ Sentence-transformers model loaded and tested successfully")
+            else:
+                logger.warning("Sentence-transformers model test failed")
         except Exception as e:
             logger.warning(f"Failed to pre-load sentence-transformers: {e}")
 

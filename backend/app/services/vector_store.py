@@ -78,6 +78,10 @@ class VectorStore:
         self._embedding_model = None
         self._openai_client = None
 
+        # Initialize the embedding model immediately if sentence-transformers is selected
+        if self.embedding_provider == "sentence-transformers":
+            self._init_sentence_transformers()
+
         # Only ensure extension if we have a database session
         if self.db is not None:
             self._ensure_extension()
@@ -140,6 +144,15 @@ class VectorStore:
             # Fallback: initialize model normally
             from sentence_transformers import SentenceTransformer
             logger.info("Initializing sentence-transformers model...")
+
+            # Check if model is already cached from Docker build
+            import os
+            model_path = os.path.expanduser("~/.cache/torch/sentence_transformers/all-MiniLM-L6-v2")
+            if os.path.exists(model_path):
+                logger.info("✓ Using pre-cached sentence-transformers model from Docker build")
+            else:
+                logger.info("Downloading sentence-transformers model...")
+
             self._embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
             logger.info("✓ Sentence-transformers model initialized successfully")
             return True
@@ -147,7 +160,7 @@ class VectorStore:
             logger.warning("sentence_transformers package not available")
             return False
         except Exception as e:
-            logger.warning(f"Failed to initialize sentence-transformers: {e}")
+            logger.error(f"Failed to initialize sentence-transformers: {e}")
             return False
 
     def _init_gemini(self) -> bool:

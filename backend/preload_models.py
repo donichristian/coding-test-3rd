@@ -140,12 +140,19 @@ def preload_sentence_transformers():
     try:
         logger.info("Pre-loading sentence-transformers models...")
         from sentence_transformers import SentenceTransformer
-        
+
         # Use a common model that's likely to be used
         # This will download the model if not cached
         model = SentenceTransformer('all-MiniLM-L6-v2')
-        logger.info("Sentence-transformers models pre-loaded successfully")
-        return True
+
+        # Test the model with a simple encoding to ensure it's fully loaded
+        test_embedding = model.encode("test sentence")
+        if test_embedding is not None and len(test_embedding) == 384:
+            logger.info("✓ Sentence-transformers model tested and cached successfully")
+            return True
+        else:
+            logger.warning("Sentence-transformers model test failed")
+            return False
     except Exception as e:
         logger.warning(f"Could not pre-load sentence-transformers models: {e}")
         return False

@@ -6,6 +6,8 @@ import { Upload, CheckCircle, XCircle, Loader2, Table, FileText } from "lucide-r
 import { documentApi, fundApi } from "@/lib/api";
 import { formatCurrency } from "@/lib/utils";
 
+const UPLOAD_STATUS_KEY = 'upload_status';
+
 export default function UploadPage() {
    const [uploading, setUploading] = useState(false);
    const [uploadStatus, setUploadStatus] = useState<{
@@ -25,6 +27,34 @@ export default function UploadPage() {
      retryCount?: number;
      maxRetries?: number;
    }>({ status: "idle" });
+
+  // Load persisted upload status on component mount
+  useEffect(() => {
+    const persistedStatus = localStorage.getItem(UPLOAD_STATUS_KEY);
+    if (persistedStatus) {
+      try {
+        const parsedStatus = JSON.parse(persistedStatus);
+        setUploadStatus(parsedStatus);
+        setUploading(parsedStatus.status === "uploading" || parsedStatus.status === "processing");
+      } catch (error) {
+        console.error('Failed to parse persisted upload status:', error);
+        localStorage.removeItem(UPLOAD_STATUS_KEY);
+      }
+    }
+  }, []);
+
+  // Persist upload status to localStorage whenever it changes
+  useEffect(() => {
+    if (uploadStatus.status !== "idle") {
+      localStorage.setItem(UPLOAD_STATUS_KEY, JSON.stringify(uploadStatus));
+    } else {
+      localStorage.removeItem(UPLOAD_STATUS_KEY);
+    }
+  }, [uploadStatus]);
+
+  const clearPersistedData = useCallback(() => {
+    localStorage.removeItem(UPLOAD_STATUS_KEY);
+  }, []);
 
   // Update elapsed time every second during processing
   useEffect(() => {
@@ -48,6 +78,9 @@ export default function UploadPage() {
 
     const file = acceptedFiles[0];
     const maxRetries = 3;
+
+    // Clear any previous persisted data when starting new upload
+    clearPersistedData();
 
     setUploading(true);
     setUploadStatus({
@@ -399,6 +432,7 @@ export default function UploadPage() {
                           onClick={() => {
                             setUploadStatus({ status: "idle" });
                             setUploading(false);
+                            clearPersistedData();
                           }}
                           className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 transition text-sm"
                         >
@@ -472,17 +506,6 @@ export default function UploadPage() {
                                     </span>
                                   )}
                                 </div>
-                                <button
-                                  onClick={() => {
-                                    if (uploadStatus.extractedData?.metrics) {
-                                      navigator.clipboard.writeText(JSON.stringify(uploadStatus.extractedData.metrics, null, 2));
-                                      alert('Metrics JSON copied to clipboard!');
-                                    }
-                                  }}
-                                  className="text-xs bg-blue-100 hover:bg-blue-200 text-blue-700 px-2 py-1 rounded"
-                                >
-                                  Copy JSON
-                                </button>
                               </div>
                             </div>
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -571,9 +594,10 @@ export default function UploadPage() {
                                 <thead className="bg-gray-50">
                                   <tr>
                                     <th className="px-4 py-2 text-left text-gray-600">Date</th>
-                                    <th className="px-4 py-2 text-left text-gray-600">Amount</th>
                                     <th className="px-4 py-2 text-left text-gray-600">Type</th>
+                                    <th className="px-4 py-2 text-left text-gray-600">Amount</th>
                                     <th className="px-4 py-2 text-left text-gray-600">Recallable</th>
+                                    <th className="px-4 py-2 text-left text-gray-600">Description</th>
                                   </tr>
                                 </thead>
                                 <tbody>
@@ -582,10 +606,10 @@ export default function UploadPage() {
                                       <td className="px-4 py-2">
                                         {dist.distribution_date ? new Date(dist.distribution_date).toLocaleDateString() : 'N/A'}
                                       </td>
+                                      <td className="px-4 py-2">{dist.distribution_type || 'N/A'}</td>
                                       <td className="px-4 py-2 font-medium">
                                         {dist.amount ? formatCurrency(dist.amount) : 'N/A'}
                                       </td>
-                                      <td className="px-4 py-2">{dist.distribution_type || 'N/A'}</td>
                                       <td className="px-4 py-2">
                                         {dist.is_recallable ? (
                                           <span className="text-green-600">Yes</span>
@@ -593,6 +617,7 @@ export default function UploadPage() {
                                           <span className="text-orange-600">No</span>
                                         )}
                                       </td>
+                                      <td className="px-4 py-2">{dist.description || 'N/A'}</td>
                                     </tr>
                                   ))}
                                 </tbody>
@@ -620,9 +645,9 @@ export default function UploadPage() {
                                 <thead className="bg-gray-50">
                                   <tr>
                                     <th className="px-4 py-2 text-left text-gray-600">Date</th>
-                                    <th className="px-4 py-2 text-left text-gray-600">Amount</th>
                                     <th className="px-4 py-2 text-left text-gray-600">Type</th>
-                                    <th className="px-4 py-2 text-left text-gray-600">Category</th>
+                                    <th className="px-4 py-2 text-left text-gray-600">Amount</th>
+                                    <th className="px-4 py-2 text-left text-gray-600">Description</th>
                                   </tr>
                                 </thead>
                                 <tbody>
@@ -631,11 +656,11 @@ export default function UploadPage() {
                                       <td className="px-4 py-2">
                                         {adj.adjustment_date ? new Date(adj.adjustment_date).toLocaleDateString() : 'N/A'}
                                       </td>
+                                      <td className="px-4 py-2">{adj.adjustment_type || 'N/A'}</td>
                                       <td className="px-4 py-2 font-medium">
                                         {adj.amount ? formatCurrency(adj.amount) : 'N/A'}
                                       </td>
-                                      <td className="px-4 py-2">{adj.adjustment_type || 'N/A'}</td>
-                                      <td className="px-4 py-2">{adj.category || 'N/A'}</td>
+                                      <td className="px-4 py-2">{adj.description || 'N/A'}</td>
                                     </tr>
                                   ))}
                                 </tbody>
@@ -676,6 +701,16 @@ export default function UploadPage() {
                       >
                         View Fund Dashboard
                       </a>
+                      <button
+                        onClick={() => {
+                          setUploadStatus({ status: "idle" });
+                          setUploading(false);
+                          clearPersistedData();
+                        }}
+                        className="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700 transition text-sm"
+                      >
+                        Clear Results
+                      </button>
                     </div>
                   </div>
                 )}
