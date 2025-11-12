@@ -1,11 +1,8 @@
 """
-RAG (Retrieval Augmented Generation) Engine using LangChain
+RAG (Retrieval Augmented Generation) Engine using Docling and LangChain
 
-This module implements the RAG pipeline for fund performance analysis:
-1. Query processing and intent classification
-2. Vector similarity search for relevant context
-3. LLM generation with retrieved context
-4. Response formatting with citations
+This module implements the RAG pipeline for fund performance analysis using Docling's
+native LangChain integration for document processing and chunking.
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -22,6 +19,9 @@ from langchain_core.runnables import RunnablePassthrough
 from langchain_openai import ChatOpenAI
 from langchain_community.llms import Ollama
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_docling import DoclingLoader
+from langchain_docling.loader import ExportType
+from docling.chunking import HybridChunker
 
 from app.core.config import settings
 from app.services.vector_store import VectorStore
@@ -55,7 +55,7 @@ class QueryResult:
    success: bool
    error: Optional[str] = None
    metadata: Optional[Dict[str, Any]] = None
-   
+    
 class LLMProvider(Protocol):
     """Protocol for LLM providers."""
     
@@ -450,19 +450,88 @@ class LLMFactory:
         logger.warning("No LLM provider configured")
         return None
 
+
+class DoclingDocumentProcessor:
+    """
+    Document processor using Docling's LangChain integration.
+    
+    This class leverages DoclingLoader for seamless document processing
+    and chunking, eliminating the need for custom document processing logic.
+    """
+
+    def __init__(self):
+        """Initialize the Docling document processor."""
+        self.chunker = None
+        self._initialize_chunker()
+
+    def _initialize_chunker(self):
+        """Initialize the Docling chunker with default settings."""
+        try:
+            # Use Docling's HybridChunker for optimal chunking
+            self.chunker = HybridChunker(tokenizer=settings.EMBEDDING_MODEL)
+            logger.info("✓ Docling HybridChunker initialized")
+        except Exception as e:
+            logger.warning(f"Failed to initialize Docling chunker: {e}")
+            self.chunker = None
+
+    def process_documents_for_rag(
+        self, 
+        file_paths: List[str], 
+        export_type: ExportType = ExportType.DOC_CHUNKS
+    ) -> List[Dict[str, Any]]:
+        """
+        Process documents using DoclingLoader for RAG applications.
+        
+        Args:
+            file_paths: List of file paths to process
+            export_type: Export type (DOC_CHUNKS or MARKDOWN)
+            
+        Returns:
+            List of processed document chunks ready for LangChain
+        """
+        try:
+            # Create DoclingLoader with hybrid chunking
+            loader = DoclingLoader(
+                file_path=file_paths,
+                export_type=export_type,
+                chunker=self.chunker
+            )
+
+            # Load documents using Docling's native processing
+            docs = loader.load()
+            
+            # Convert to format expected by RAG pipeline
+            processed_docs = []
+            for doc in docs:
+                processed_docs.append({
+                    "page_content": doc.page_content,
+                    "metadata": doc.metadata,
+                    "type": "langchain_document"
+                })
+            
+            logger.info(f"Processed {len(processed_docs)} documents using DoclingLoader")
+            return processed_docs
+
+        except Exception as e:
+            logger.error(f"DoclingLoader processing failed: {e}")
+            return []
+
+
 class RAGEngine:
-    """RAG engine for fund performance Q&A using LangChain"""
+    """RAG engine for fund performance Q&A using Docling and LangChain"""
 
     # Shared singleton instances to prevent model reloading
     _shared_vector_store: Optional[VectorStore] = None
     _shared_metrics_provider: Optional[MetricsProvider] = None
     _shared_llm_provider: Optional[LLMProvider] = None
+    _shared_docling_processor: Optional[DoclingDocumentProcessor] = None
 
     def __init__(
         self,
         vector_store: Optional[VectorStore] = None,
         metrics_calculator: Optional[MetricsCalculator] = None,
-        llm_provider: Optional[LLMProvider] = None
+        llm_provider: Optional[LLMProvider] = None,
+        docling_processor: Optional[DoclingDocumentProcessor] = None
     ):
         # Use shared instances to prevent model reloading on each query
         if vector_store is not None:
@@ -485,6 +554,13 @@ class RAGEngine:
             if RAGEngine._shared_llm_provider is None:
                 RAGEngine._shared_llm_provider = LLMFactory.create_llm()
             self.llm_provider = RAGEngine._shared_llm_provider
+
+        if docling_processor is not None:
+            self.docling_processor = docling_processor
+        else:
+            if RAGEngine._shared_docling_processor is None:
+                RAGEngine._shared_docling_processor = DoclingDocumentProcessor()
+            self.docling_processor = RAGEngine._shared_docling_processor
 
         # Component initialization (create fresh instances for thread safety)
         self.intent_classifier = IntentClassifier()
@@ -567,6 +643,23 @@ class RAGEngine:
                 "processing_time": round(time.time() - start_time, 2),
                 "sources": []
             }
+
+    def process_documents_for_rag(
+        self, 
+        file_paths: List[str], 
+        export_type: ExportType = ExportType.DOC_CHUNKS
+    ) -> List[Dict[str, Any]]:
+        """
+        Process documents using DoclingLoader for RAG ingestion.
+        
+        Args:
+            file_paths: List of file paths to process
+            export_type: Export type (DOC_CHUNKS or MARKDOWN)
+            
+        Returns:
+            List of processed document chunks
+        """
+        return self.docling_processor.process_documents_for_rag(file_paths, export_type)
 
     def _enhance_query_with_history(
         self,

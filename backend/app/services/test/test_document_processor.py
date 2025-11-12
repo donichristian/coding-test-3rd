@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Comprehensive unit tests for the document processing pipeline.
+Comprehensive unit tests for the Docling-based document processing pipeline.
 
-This module tests the DocumentProcessor, TableParser, and related components
+This module tests the DoclingDocumentProcessor and related components
 with comprehensive coverage including edge cases, error handling, and integration tests.
 """
 
@@ -19,25 +19,12 @@ from pathlib import Path
 sys.path.insert(0, '/app')
 
 from app.services.document_processor import (
-    DocumentProcessor,
-    DocumentExtractor,
-    TextChunker,
-    DataStorer,
+    DoclingDocumentProcessor,
+    DocumentService,
     DataParser,
     ProcessingStatus,
     ProcessingResult
 )
-from app.services.table_parser import (
-    TableParser,
-    TableClassifier,
-    DoclingTableExtractor,
-    PdfPlumberTableExtractor,
-    TableType,
-    TableData,
-    ClassificationResult,
-    ProcessingMethod
-)
-from app.models.transaction import CapitalCall, Distribution, Adjustment
 
 
 class TestDataParser:
@@ -139,388 +126,133 @@ class TestDataParser:
         assert result == expected
 
 
-class TestTableClassifier:
-    """Test TableClassifier with various table types and edge cases."""
-
-    @pytest.fixture
-    def classifier(self):
-        return TableClassifier()
-
-    def test_classify_capital_calls_unique_column(self, classifier):
-        """Test classification of capital calls by unique column identifier."""
-        table_data = TableData(
-            headers=["Date", "Call Number", "Amount", "Description"],
-            rows=[
-                {"Date": "2023-01-15", "Call Number": "Call 1", "Amount": "$1,000,000", "Description": "Initial"},
-                {"Date": "2023-06-20", "Call Number": "Call 2", "Amount": "$500,000", "Description": "Follow-on"}
-            ],
-            metadata={}
-        )
-
-        result = classifier.classify(table_data)
-        assert result.table_type == TableType.CAPITAL_CALLS
-        assert result.confidence == 1.0
-        assert "Unique column identifier" in result.reason
-
-    def test_classify_distributions_unique_column(self, classifier):
-        """Test classification of distributions by unique column identifier."""
-        table_data = TableData(
-            headers=["Date", "Type", "Amount", "Recallable"],
-            rows=[
-                {"Date": "2023-12-15", "Type": "Return", "Amount": "$500,000", "Recallable": "No"},
-                {"Date": "2024-06-20", "Type": "Income", "Amount": "$100,000", "Recallable": "No"}
-            ],
-            metadata={}
-        )
-
-        result = classifier.classify(table_data)
-        assert result.table_type == TableType.DISTRIBUTIONS
-        assert result.confidence == 1.0
-        assert "Unique column identifier" in result.reason
-
-    def test_classify_capital_calls_content_keywords(self, classifier):
-        """Test classification of capital calls by content keywords."""
-        table_data = TableData(
-            headers=["Date", "Amount", "Description"],
-            rows=[
-                {"Date": "2023-01-15", "Amount": "$1,000,000", "Description": "Initial capital commitment"},
-                {"Date": "2023-06-20", "Amount": "$500,000", "Description": "Follow-on investment"}
-            ],
-            metadata={}
-        )
-
-        result = classifier.classify(table_data)
-        assert result.table_type == TableType.CAPITAL_CALLS
-        assert result.confidence == 0.9
-        assert "Content keywords" in result.reason
-
-    def test_classify_distributions_header_keywords(self, classifier):
-        """Test classification of distributions by header keywords."""
-        table_data = TableData(
-            headers=["Distribution Date", "Distribution Amount", "Type"],
-            rows=[
-                {"Distribution Date": "2023-12-15", "Distribution Amount": "$500,000", "Type": "Return"},
-                {"Distribution Date": "2024-06-20", "Distribution Amount": "$100,000", "Type": "Dividend"}
-            ],
-            metadata={}
-        )
-
-        result = classifier.classify(table_data)
-        assert result.table_type == TableType.DISTRIBUTIONS
-        # Content keywords take priority over header keywords, so confidence is 0.9
-        assert result.confidence == 0.9
-        assert "Content keywords" in result.reason
-
-    def test_classify_adjustments_content_keywords(self, classifier):
-        """Test classification of adjustments by content keywords."""
-        table_data = TableData(
-            headers=["Date", "Amount", "Description"],
-            rows=[
-                {"Date": "2024-01-15", "Amount": "$10,000", "Description": "Management fee adjustment"},
-                {"Date": "2024-03-20", "Amount": "$5,000", "Description": "Performance fee"}
-            ],
-            metadata={}
-        )
-
-        result = classifier.classify(table_data)
-        assert result.table_type == TableType.ADJUSTMENTS
-        assert result.confidence == 0.9
-        assert "Content keywords" in result.reason
-
-    def test_classify_distribution_pattern_positive_amounts(self, classifier):
-        """Test classification using distribution pattern (positive amounts)."""
-        table_data = TableData(
-            headers=["Date", "Amount", "Description"],
-            rows=[
-                {"Date": "2023-12-15", "Amount": "$500,000", "Description": "Return of capital"},
-                {"Date": "2024-06-20", "Amount": "$100,000", "Description": "Dividend payment"},
-                {"Date": "2024-09-10", "Amount": "$200,000", "Description": "Exit proceeds"}
-            ],
-            metadata={}
-        )
-
-        result = classifier.classify(table_data)
-        assert result.table_type == TableType.DISTRIBUTIONS
-        # Content keywords take priority over pattern matching, so confidence is 0.9
-        assert result.confidence == 0.9
-        assert "Content keywords" in result.reason
-
-    def test_classify_no_match(self, classifier):
-        """Test classification when no patterns match."""
-        table_data = TableData(
-            headers=["Name", "Email", "Phone"],
-            rows=[
-                {"Name": "John Doe", "Email": "john@example.com", "Phone": "123-456-7890"},
-                {"Name": "Jane Smith", "Email": "jane@example.com", "Phone": "098-765-4321"}
-            ],
-            metadata={}
-        )
-
-        result = classifier.classify(table_data)
-        assert result.table_type is None
-        assert result.confidence == 0.0
-        assert "No matching patterns found" in result.reason
-
-    def test_classify_empty_table(self, classifier):
-        """Test classification of empty table."""
-        table_data = TableData(
-            headers=[],
-            rows=[],
-            metadata={}
-        )
-
-        result = classifier.classify(table_data)
-        assert result.table_type is None
-        assert result.confidence == 0.0
-
-
-class TestTableParser:
-    """Test TableParser integration and fallback logic."""
-
-    @pytest.fixture
-    def mock_docling_extractor(self):
-        """Mock Docling extractor that returns tables."""
-        extractor = Mock(spec=DoclingTableExtractor)
-        extractor.extract_tables.return_value = [
-            TableData(
-                headers=["Date", "Amount", "Description"],
-                rows=[
-                    {"Date": "2023-01-15", "Amount": "$1,000,000", "Description": "Initial capital"},
-                    {"Date": "2023-06-20", "Amount": "$500,000", "Description": "Follow-on"}
-                ],
-                metadata={"source": "docling"}
-            )
-        ]
-        return extractor
-
-    @pytest.fixture
-    def mock_pdfplumber_extractor(self):
-        """Mock pdfplumber extractor as fallback."""
-        extractor = Mock(spec=PdfPlumberTableExtractor)
-        extractor.extract_tables.return_value = [
-            TableData(
-                headers=["Date", "Amount", "Description"],
-                rows=[
-                    {"Date": "2023-01-15", "Amount": "$1,000,000", "Description": "Initial capital"}
-                ],
-                metadata={"source": "pdfplumber"}
-            )
-        ]
-        return extractor
-
-    @pytest.fixture
-    def mock_classifier(self):
-        """Mock classifier that returns capital calls."""
-        classifier = Mock(spec=TableClassifier)
-        classifier.classify.return_value = ClassificationResult(
-            table_type=TableType.CAPITAL_CALLS,
-            confidence=0.9,
-            reason="Content keywords"
-        )
-        return classifier
-
-    def test_parse_tables_docling_success(self, mock_docling_extractor, mock_classifier):
-        """Test successful table parsing with Docling."""
-        parser = TableParser(
-            primary_extractor=mock_docling_extractor,
-            classifier=mock_classifier
-        )
-
-        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_file:
-            tmp_file.write(b"dummy pdf content")
-            tmp_file_path = tmp_file.name
-
-        try:
-            result = parser.parse_tables(file_path=tmp_file_path)
-
-            assert result["processing_method"] == "docling"
-            assert len(result["capital_calls"]) == 1
-            assert len(result["distributions"]) == 0
-            assert len(result["adjustments"]) == 0
-
-            # Verify the table has classification metadata
-            table = result["capital_calls"][0]
-            assert table["metadata"]["classification_confidence"] == 0.9
-            assert table["metadata"]["classification_reason"] == "Content keywords"
-
-        finally:
-            os.unlink(tmp_file_path)
-
-    def test_parse_tables_docling_fallback_to_pdfplumber(self, mock_pdfplumber_extractor, mock_classifier):
-        """Test fallback to pdfplumber when Docling fails."""
-        # Mock Docling extractor to return empty results
-        mock_docling_extractor = Mock(spec=DoclingTableExtractor)
-        mock_docling_extractor.extract_tables.return_value = []
-
-        parser = TableParser(
-            primary_extractor=mock_docling_extractor,
-            fallback_extractor=mock_pdfplumber_extractor,
-            classifier=mock_classifier
-        )
-
-        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_file:
-            tmp_file.write(b"dummy pdf content")
-            tmp_file_path = tmp_file.name
-
-        try:
-            result = parser.parse_tables(file_path=tmp_file_path)
-
-            assert result["processing_method"] == "pdfplumber"
-            assert len(result["capital_calls"]) == 1
-            assert len(result["distributions"]) == 0
-            assert len(result["adjustments"]) == 0
-
-        finally:
-            os.unlink(tmp_file_path)
-
-    def test_parse_tables_both_extractors_fail(self):
-        """Test error handling when both extractors fail."""
-        # Mock extractors to raise exceptions
-        mock_docling_extractor = Mock(spec=DoclingTableExtractor)
-        mock_docling_extractor.extract_tables.side_effect = Exception("Docling failed")
-
-        mock_pdfplumber_extractor = Mock(spec=PdfPlumberTableExtractor)
-        mock_pdfplumber_extractor.extract_tables.side_effect = Exception("pdfplumber failed")
-
-        parser = TableParser(
-            primary_extractor=mock_docling_extractor,
-            fallback_extractor=mock_pdfplumber_extractor
-        )
-
-        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_file:
-            tmp_file_path = tmp_file.name
-
-        try:
-            result = parser.parse_tables(file_path=tmp_file_path)
-
-            assert result["processing_method"] == "error"
-            assert len(result["capital_calls"]) == 0
-            assert len(result["distributions"]) == 0
-            assert len(result["adjustments"]) == 0
-
-        finally:
-            os.unlink(tmp_file_path)
-
-    def test_parse_tables_no_file_path_no_doc(self):
-        """Test error when neither file_path nor doc is provided."""
-        parser = TableParser()
-
-        with pytest.raises(ValueError, match="Either file_path or doc must be provided"):
-            parser.parse_tables()
-
-
-class TestDocumentProcessor:
-    """Test DocumentProcessor with mocked dependencies."""
-
-    @pytest.fixture
-    def mock_document_extractor(self):
-        """Mock document extractor."""
-        extractor = Mock(spec=DocumentExtractor)
-        extractor.extract_text.return_value = [
-            {"page": 1, "content": "Sample document text", "type": "document_text"}
-        ]
-        extractor.extract_tables.return_value = {
-            "capital_calls": [
-                {
-                    "headers": ["Date", "Amount", "Description"],
-                    "rows": [
-                        {"Date": "2023-01-15", "Amount": "$1,000,000", "Description": "Initial capital"}
-                    ],
-                    "metadata": {}
-                }
-            ],
-            "distributions": [],
-            "adjustments": [],
-            "processing_method": "docling"
-        }
-        return extractor
-
-    @pytest.fixture
-    def mock_text_chunker(self):
-        """Mock text chunker."""
-        chunker = Mock(spec=TextChunker)
-        chunker.chunk_text.return_value = [
-            {
-                "content": "Sample document text",
-                "metadata": {"page": 1, "type": "document_text", "chunk_index": 0}
-            }
-        ]
-        return chunker
-
-    @pytest.fixture
-    def mock_data_storer(self):
-        """Mock data storer."""
-        storer = Mock(spec=DataStorer)
-        storer.store_chunks = AsyncMock(return_value=True)
-        storer.store_tables = AsyncMock(return_value=1)
-        return storer
+class TestDoclingDocumentProcessor:
+    """Test DoclingDocumentProcessor with mocked dependencies."""
 
     @pytest.fixture
     def mock_converter(self):
         """Mock Docling converter."""
         converter = Mock()
+        
+        # Create mock document with expected Docling attributes
         mock_doc = Mock()
         mock_doc.pages = [Mock()]  # Mock pages
-        mock_doc.text = "Sample document text"
         mock_doc.export_to_markdown.return_value = "# Sample Document\n\nContent here."
-
+        
+        # Mock table structure
+        mock_table = Mock()
+        mock_table.export_to_dataframe.return_value = Mock(
+            to_dict=lambda records: [
+                {"Date": "2023-01-15", "Amount": "$1,000,000", "Description": "Initial capital"}
+            ]
+        )
+        mock_table.confidence = 0.9
+        mock_table.page_number = 1
+        mock_doc.tables = [mock_table]
+        
         converter.convert.return_value = Mock(document=mock_doc)
         return converter
 
-    def test_process_document_success(self, mock_document_extractor, mock_text_chunker,
-                                    mock_data_storer, mock_converter):
+    @pytest.fixture
+    def mock_vector_store(self):
+        """Mock vector store."""
+        store = Mock()
+        store.store_chunks = AsyncMock(return_value=True)
+        return store
+
+    @pytest.fixture
+    def processor(self, mock_converter):
+        """Create processor with mocked converter."""
+        processor = DoclingDocumentProcessor(converter=mock_converter)
+        return processor
+
+    def test_init_with_custom_converter(self, mock_converter):
+        """Test processor initialization with custom converter."""
+        processor = DoclingDocumentProcessor(converter=mock_converter)
+        assert processor.converter == mock_converter
+
+    @patch('app.services.document_processor.SessionLocal')
+    @patch('app.services.document_processor.Document')
+    def test_ensure_fund_exists_new_fund(self, mock_document_class, mock_session_local):
+        """Test creating a new fund when it doesn't exist."""
+        # Mock session setup
+        mock_session = Mock()
+        mock_session.query.return_value.filter.return_value.first.return_value = None
+        
+        # Mock fund creation
+        mock_fund = Mock()
+        mock_fund.id = 2
+        mock_session.add = Mock()
+        mock_session.commit = Mock()
+        mock_session.refresh = Mock()
+        
+        mock_session_local.return_value = mock_session
+        mock_document_class.return_value = mock_fund
+
+        service = DocumentService()
+        fund_id = service.ensure_fund_exists(2)
+
+        assert fund_id == 2
+        mock_session.add.assert_called_once()
+        mock_session.commit.assert_called_once()
+
+    @patch('app.services.document_processor.SessionLocal')
+    def test_ensure_fund_exists_existing_fund(self, mock_session_local):
+        """Test returning existing fund when it already exists."""
+        # Mock existing fund
+        mock_existing_fund = Mock()
+        mock_existing_fund.id = 3
+        
+        mock_session = Mock()
+        mock_session.query.return_value.filter.return_value.first.return_value = mock_existing_fund
+        
+        mock_session_local.return_value = mock_session
+
+        service = DocumentService()
+        fund_id = service.ensure_fund_exists(3)
+
+        assert fund_id == 3
+        mock_session.add.assert_not_called()
+        mock_session.commit.assert_not_called()
+
+    @patch('app.services.document_processor.Document')
+    @patch('app.services.document_processor.SessionLocal')
+    def test_update_document_status_success(self, mock_session_local, mock_document_class):
+        """Test successful document status update."""
+        # Mock document that exists
+        mock_document = Mock()
+        mock_document.fund_id = None
+        
+        mock_session = Mock()
+        mock_session.query.return_value.filter.return_value.first.return_value = mock_document
+        mock_session.commit = Mock()
+        
+        mock_session_local.return_value = mock_session
+
+        service = DocumentService()
+        success = service.update_document_status(1, "completed")
+
+        assert success is True
+        assert mock_document.parsing_status == "completed"
+        mock_session.commit.assert_called_once()
+
+    @patch('app.services.document_processor.SessionLocal')
+    def test_update_document_status_not_found(self, mock_session_local):
+        """Test document status update when document doesn't exist."""
+        mock_session = Mock()
+        mock_session.query.return_value.filter.return_value.first.return_value = None
+        mock_session.commit = Mock()
+        
+        mock_session_local.return_value = mock_session
+
+        service = DocumentService()
+        success = service.update_document_status(999, "completed")
+
+        assert success is False
+        mock_session.commit.assert_not_called()
+
+    def test_process_document_sync_success(self, processor, mock_vector_store):
         """Test successful document processing."""
-        processor = DocumentProcessor(
-            document_extractor=mock_document_extractor,
-            text_chunker=mock_text_chunker,
-            data_storer=mock_data_storer,
-            converter=mock_converter
-        )
-
-        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_file:
-            tmp_file.write(b"dummy pdf content")
-            tmp_file_path = tmp_file.name
-
-        try:
-            # Run async test
-            async def run_test():
-                result = await processor.process_document(tmp_file_path, 1, 1)
-
-                assert isinstance(result, ProcessingResult)
-                assert result.status == ProcessingStatus.SUCCESS
-                assert result.document_id == 1
-                assert result.fund_id == 1
-                assert result.tables_extracted["capital_calls"] == 1
-                assert result.tables_extracted["distributions"] == 0
-                assert result.tables_extracted["adjustments"] == 0
-                assert result.text_chunks_created == 1
-                assert result.total_pages == 1
-                assert result.processing_method == "docling"
-                assert "Document processed successfully" in result.note
-
-                # Verify mocks were called
-                mock_converter.convert.assert_called_once_with(tmp_file_path)
-                mock_document_extractor.extract_text.assert_called_once()
-                mock_document_extractor.extract_tables.assert_called_once()
-                mock_text_chunker.chunk_text.assert_called_once()
-                mock_data_storer.store_chunks.assert_called_once()
-                mock_data_storer.store_tables.assert_called_once()
-
-            asyncio.run(run_test())
-
-        finally:
-            os.unlink(tmp_file_path)
-
-    def test_process_document_sync_success(self, mock_document_extractor, mock_text_chunker,
-                                          mock_data_storer, mock_converter):
-        """Test synchronous document processing."""
-        processor = DocumentProcessor(
-            document_extractor=mock_document_extractor,
-            text_chunker=mock_text_chunker,
-            data_storer=mock_data_storer,
-            converter=mock_converter
-        )
-
         with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_file:
             tmp_file.write(b"dummy pdf content")
             tmp_file_path = tmp_file.name
@@ -532,22 +264,19 @@ class TestDocumentProcessor:
             assert result.status == ProcessingStatus.SUCCESS
             assert result.document_id == 1
             assert result.fund_id == 1
-            assert result.tables_extracted["capital_calls"] == 1
             assert result.processing_time > 0
+            assert result.processing_method == "docling_native"
 
         finally:
             os.unlink(tmp_file_path)
 
-    def test_process_document_converter_failure(self, mock_data_storer):
+    def test_process_document_sync_converter_failure(self):
         """Test document processing when converter fails."""
-        # Mock converter to raise exception
+        # Mock converter that raises exception
         mock_converter = Mock()
         mock_converter.convert.side_effect = Exception("Converter failed")
 
-        processor = DocumentProcessor(
-            data_storer=mock_data_storer,
-            converter=mock_converter
-        )
+        processor = DoclingDocumentProcessor(converter=mock_converter)
 
         with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_file:
             tmp_file_path = tmp_file.name
@@ -558,249 +287,83 @@ class TestDocumentProcessor:
             assert result.status == ProcessingStatus.ERROR
             assert result.document_id == 1
             assert result.fund_id == 1
-            assert result.error == "Converter failed"
-            assert result.processing_time > 0
+            assert "Converter failed" in result.error
 
         finally:
             os.unlink(tmp_file_path)
 
-    def test_process_document_text_extraction_failure(self, mock_converter, mock_data_storer):
-        """Test document processing when text extraction fails."""
-        # Mock extractor to raise exception during text extraction
-        mock_extractor = Mock(spec=DocumentExtractor)
-        mock_extractor.extract_text.side_effect = Exception("Text extraction failed")
-        mock_extractor.extract_tables.return_value = {
-            "capital_calls": [], "distributions": [], "adjustments": [],
-            "processing_method": "docling"
-        }
+    def test_create_structured_chunks(self, processor):
+        """Test structured chunk creation."""
+        content = "# Title\n\nSome content here.\n\n## Section 1\n\nMore content."
+        metadata = {"doc_type": "pdf", "page": 1}
+        chunks = processor._create_structured_chunks(content, metadata, 1, 1)
 
-        processor = DocumentProcessor(
-            document_extractor=mock_extractor,
-            data_storer=mock_data_storer,
-            converter=mock_converter
-        )
+        assert len(chunks) > 0
+        assert all("content" in chunk for chunk in chunks)
+        assert all("metadata" in chunk for chunk in chunks)
+        assert all("chunk_index" in chunk["metadata"] for chunk in chunks)
 
-        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_file:
-            tmp_file_path = tmp_file.name
-
-        try:
-            result = processor.process_document_sync(tmp_file_path, 1, 1)
-
-            # Should fail when text extraction fails (table extraction still succeeds)
-            assert result.status == ProcessingStatus.ERROR
-            assert result.document_id == 1
-            assert result.fund_id == 1
-            assert "Text extraction failed" in result.error
-
-        finally:
-            os.unlink(tmp_file_path)
-
-
-class TestTextChunker:
-    """Test TextChunker functionality."""
-
-    @pytest.fixture
-    def chunker(self):
-        return TextChunker(chunk_size=100, chunk_overlap=20)
-
-    def test_chunk_text_single_chunk(self, chunker):
-        """Test chunking text that fits in single chunk."""
-        text_content = [
-            {"page": 1, "content": "Short text that fits in one chunk.", "type": "document_text"}
+    def test_classify_table_for_business_logic(self, processor):
+        """Test table classification for business logic."""
+        # Test capital calls classification
+        capital_call_rows = [
+            {"Date": "2023-01-15", "Amount": "$1,000,000", "Commitment": "Capital Call 1"}
         ]
+        result = processor._classify_table_for_business_logic(capital_call_rows, "capital_table")
+        assert result == "capital_calls"
 
-        chunks = chunker.chunk_text(text_content)
-
-        assert len(chunks) == 1
-        assert chunks[0]["content"] == "Short text that fits in one chunk."
-        assert chunks[0]["metadata"]["page"] == 1
-        assert chunks[0]["metadata"]["chunk_index"] == 0
-
-    def test_chunk_text_multiple_chunks(self, chunker):
-        """Test chunking text that requires multiple chunks."""
-        long_text = "A" * 150  # 150 characters
-        text_content = [
-            {"page": 1, "content": long_text, "type": "document_text"}
+        # Test distributions classification
+        distribution_rows = [
+            {"Date": "2023-12-15", "Amount": "$500,000", "Type": "Return"}
         ]
+        result = processor._classify_table_for_business_logic(distribution_rows, "distribution_table")
+        assert result == "distributions"
 
-        chunks = chunker.chunk_text(text_content)
-
-        assert len(chunks) == 2  # Should split into 2 chunks
-
-        # First chunk: 100 chars + overlap handling
-        assert len(chunks[0]["content"]) <= 100
-        assert chunks[0]["metadata"]["chunk_index"] == 0
-
-        # Second chunk: remaining chars
-        assert len(chunks[1]["content"]) <= 100
-        assert chunks[1]["metadata"]["chunk_index"] == 1
-
-        # Verify overlap: some characters should overlap between chunks
-        overlap_found = False
-        for i in range(min(len(chunks[0]["content"]), len(chunks[1]["content"]))):
-            if chunks[0]["content"][-i:] == chunks[1]["content"][:i]:
-                overlap_found = True
-                break
-        assert overlap_found, "Chunks should have overlap"
-
-    def test_chunk_text_empty_content(self, chunker):
-        """Test chunking empty content."""
-        text_content = []
-        chunks = chunker.chunk_text(text_content)
-        assert len(chunks) == 0
-
-    def test_chunk_text_multiple_pages(self, chunker):
-        """Test chunking content from multiple pages."""
-        text_content = [
-            {"page": 1, "content": "Page one content.", "type": "document_text"},
-            {"page": 2, "content": "Page two content.", "type": "document_text"}
+        # Test adjustments classification
+        adjustment_rows = [
+            {"Date": "2024-01-15", "Amount": "$10,000", "Fee": "Management Fee"}
         ]
+        result = processor._classify_table_for_business_logic(adjustment_rows, "fee_table")
+        assert result == "adjustments"
 
-        chunks = chunker.chunk_text(text_content)
-
-        assert len(chunks) == 2
-        assert chunks[0]["metadata"]["page"] == 1
-        assert chunks[1]["metadata"]["page"] == 2
-
-
-class TestDataStorer:
-    """Test DataStorer with mocked database."""
-
-    @pytest.fixture
-    def mock_vector_store(self):
-        """Mock vector store."""
-        store = Mock()
-        store.store_chunks = AsyncMock(return_value=True)
-        return store
-
-    @pytest.fixture
-    def mock_data_parser(self):
-        """Mock data parser."""
-        parser = Mock(spec=DataParser)
-        parser.parse_date.return_value = date(2023, 1, 15)
-        parser.parse_amount.return_value = 1000000.0
-        parser.parse_boolean.return_value = False
-        return parser
-
-    @pytest.fixture
-    def data_storer(self, mock_vector_store, mock_data_parser):
-        return DataStorer(mock_vector_store, mock_data_parser)
-
-    @pytest.fixture
-    def mock_db_session(self):
-        """Mock database session."""
-        session = AsyncMock()
-
-        # Mock query results
-        mock_capital_call = Mock(spec=CapitalCall)
-        mock_capital_call.fund_id = 1
-        mock_capital_call.call_date = date(2023, 1, 15)
-        mock_capital_call.amount = 1000000.0
-
-        # Mock the query chain properly
-        mock_query = AsyncMock()
-        mock_filtered = AsyncMock()
-        mock_filtered.first.return_value = None  # No duplicates
-        mock_filtered.delete.return_value = 1  # Deleted 1 record
-        mock_query.filter.return_value = mock_filtered
-        session.query.return_value = mock_query
-
-        session.add_all = Mock()
-        session.commit = AsyncMock()
-        session.close = AsyncMock()
-
-        return session
-
-    @pytest.mark.asyncio
-    @patch('app.services.document_processor.SessionLocal')
-    @patch('app.services.document_processor.CapitalCall')
-    @patch('app.services.document_processor.Distribution')
-    @patch('app.services.document_processor.Adjustment')
-    async def test_store_tables_capital_calls(self, mock_adjustment_cls, mock_distribution_cls,
-                                            mock_capital_call_cls, mock_session_local,
-                                            data_storer, mock_db_session):
-        """Test storing capital calls tables."""
-        mock_session_local.return_value = mock_db_session
-
-        # Mock CapitalCall constructor
-        mock_capital_call_instance = Mock(spec=CapitalCall)
-        mock_capital_call_cls.return_value = mock_capital_call_instance
-
-        # Skip the test since database mocking is complex and not critical for pipeline validation
-        pytest.skip("Database integration test - requires complex mocking of SQLAlchemy async queries")
-
-    @pytest.mark.asyncio
-    @patch('app.services.document_processor.SessionLocal')
-    async def test_store_chunks_success(self, mock_session_local, data_storer):
-        """Test storing text chunks successfully."""
-        # Mock the database session
-        mock_db = AsyncMock()
-        mock_session_local.return_value = mock_db
-
-        # Mock the SQL execution
-        mock_db.execute = AsyncMock()
-        mock_db.commit = AsyncMock()
-        mock_db.close = AsyncMock()
-
-        # Mock numpy array for embedding with proper 384 dimensions
-        import numpy as np
-        chunks = [
-            {
-                "content": "Sample text",
-                "metadata": {"page": 1, "type": "document_text", "chunk_index": 0},
-                "embedding": np.array([0.1] * 384)  # Proper 384-dimension embedding
-            }
+        # Test unknown classification
+        unknown_rows = [
+            {"Name": "John", "Email": "john@example.com"}
         ]
+        result = processor._classify_table_for_business_logic(unknown_rows, "contact_table")
+        assert result is None
 
-        result = await data_storer.store_chunks(chunks, document_id=1, fund_id=1)
+    def test_fallback_chunking(self, processor):
+        """Test fallback chunking strategy."""
+        content = [{"content": "Test content " * 100, "metadata": {"page": 1}}]
+        chunks = processor._fallback_chunking(content, 1, 1)
 
-        assert result is True
-        # Verify database operations were called
-        # Note: The actual implementation uses _store_chunks_synchronously which creates its own session
-        # So we can't easily mock the internal database calls, but we can verify the method returns True
-        assert result is True
-
-    @pytest.mark.asyncio
-    async def test_store_chunks_empty(self, data_storer):
-        """Test storing empty chunks list."""
-        result = await data_storer.store_chunks([], document_id=1, fund_id=1)
-        assert result is True
-        data_storer.vector_store.store_chunks.assert_not_called()
+        assert len(chunks) > 1
+        assert all("content" in chunk for chunk in chunks)
+        assert all("metadata" in chunk for chunk in chunks)
+        assert all("chunking_method" in chunk["metadata"] for chunk in chunks)
 
 
-class TestIntegration:
-    """Integration tests for the complete pipeline."""
+class TestDocumentService:
+    """Test DocumentService functionality."""
 
-    @pytest.mark.asyncio
-    async def test_full_pipeline_integration(self):
-        """Test the full document processing pipeline integration."""
-        # This would be a more comprehensive integration test
-        # For now, we'll test the basic component interactions
+    @pytest.fixture
+    def service(self):
+        return DocumentService()
 
-        # Create a minimal working pipeline
-        data_parser = DataParser()
-        table_parser = TableParser()
-        document_extractor = DocumentExtractor(table_parser)
-        text_chunker = TextChunker()
-        vector_store = Mock()
-        vector_store.store_chunks = AsyncMock(return_value=True)
-        data_storer = DataStorer(vector_store, data_parser)
+    def test_get_document_not_found(self, service):
+        """Test getting non-existent document."""
+        # Mock empty query result
+        mock_db = Mock()
+        mock_db.query.return_value.filter.return_value.first.return_value = None
+        service.db = mock_db
 
-        processor = DocumentProcessor(
-            document_extractor=document_extractor,
-            text_chunker=text_chunker,
-            data_storer=data_storer
-        )
+        result = service.get_document(999)
+        assert result is None
 
-        # Verify all components are properly initialized
-        assert processor.document_extractor is not None
-        assert processor.text_chunker is not None
-        assert processor.data_storer is not None
-        assert processor.converter is not None
 
-        # Test that the processor has the expected methods
-        assert hasattr(processor, 'process_document')
-        assert hasattr(processor, 'process_document_sync')
+class TestProcessingResult:
+    """Test ProcessingResult data class."""
 
     def test_processing_result_dict_access(self):
         """Test ProcessingResult dictionary-like access."""
@@ -812,7 +375,7 @@ class TestIntegration:
             text_chunks_created=5,
             total_pages=2,
             processing_time=1.5,
-            processing_method="docling",
+            processing_method="docling_native",
             error=None,
             note="Test completed"
         )
@@ -833,6 +396,80 @@ class TestIntegration:
         assert dict_result["status"] == "success"
         assert dict_result["document_id"] == 1
         assert dict_result["tables_extracted"]["capital_calls"] == 1
+
+    def test_processing_result_to_dict_enum_conversion(self):
+        """Test that enums are properly converted to values in to_dict."""
+        result = ProcessingResult(
+            status=ProcessingStatus.SUCCESS,
+            document_id=1,
+            fund_id=1,
+            tables_extracted={"capital_calls": 0, "distributions": 0, "adjustments": 0},
+            text_chunks_created=0,
+            total_pages=0,
+            processing_time=0.0,
+            processing_method="test"
+        )
+
+        dict_result = result.to_dict()
+        assert dict_result["status"] == "success"  # Enum converted to string
+        assert isinstance(dict_result["status"], str)
+
+
+class TestIntegration:
+    """Integration tests for the complete Docling pipeline."""
+
+    @pytest.mark.asyncio
+    async def test_full_pipeline_integration(self):
+        """Test the full document processing pipeline integration."""
+        # Create a minimal working pipeline
+        data_parser = DataParser()
+        converter = Mock()
+        processor = DoclingDocumentProcessor(converter=converter)
+
+        # Verify all components are properly initialized
+        assert processor.converter is not None
+        assert processor.data_parser is not None
+        assert processor.vector_store is not None
+
+        # Test that the processor has the expected methods
+        assert hasattr(processor, 'process_document')
+        assert hasattr(processor, 'process_document_sync')
+        assert hasattr(processor, '_extract_text_content')
+        assert hasattr(processor, '_extract_tables_with_docling')
+        assert hasattr(processor, '_create_chunks_with_docling')
+
+    def test_processing_status_enum_values(self):
+        """Test ProcessingStatus enum has expected values."""
+        assert ProcessingStatus.SUCCESS.value == "success"
+        assert ProcessingStatus.ERROR.value == "error"
+        assert ProcessingStatus.PARTIAL.value == "partial"
+
+    def test_processor_uses_cached_converter(self):
+        """Test that processor uses cached converter when available."""
+        with patch('app.services.document_processor.get_cached_model') as mock_get_cached:
+            mock_converter = Mock()
+            mock_get_cached.return_value = mock_converter
+
+            processor = DoclingDocumentProcessor()
+
+            # Should call get_cached_model
+            mock_get_cached.assert_called_once_with('docling_converter')
+            assert processor.converter == mock_converter
+
+    def test_processor_creates_new_converter_on_cache_miss(self):
+        """Test that processor creates new converter when cache miss."""
+        with patch('app.services.document_processor.get_cached_model') as mock_get_cached:
+            mock_get_cached.return_value = None  # Cache miss
+
+            with patch('app.services.document_processor.DocumentConverter') as mock_converter_class:
+                mock_converter = Mock()
+                mock_converter_class.return_value = mock_converter
+
+                processor = DoclingDocumentProcessor()
+
+                # Should create new converter
+                mock_converter_class.assert_called_once()
+                assert processor.converter == mock_converter
 
 
 if __name__ == "__main__":

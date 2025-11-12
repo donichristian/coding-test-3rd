@@ -15,7 +15,6 @@ from app.schemas.document import (
     DocumentUploadResponse,
     DocumentStatus
 )
-from app.services.document_processor import DocumentProcessor
 from app.core.config import settings
 from app.tasks.document_tasks import process_document_task
 from sqlalchemy import text

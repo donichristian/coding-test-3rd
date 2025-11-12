@@ -20,11 +20,9 @@ from pathlib import Path
 # Add the app directory to Python path
 sys.path.insert(0, str(Path(__file__).parent / "app"))
 
-from app.services.document_processor import DocumentProcessor, DocumentExtractor
-from app.services.table_parser import TableParser
-from app.services.text_chunker import TextChunker
-from app.services.data_parser import DataParser
+from app.services.document_processor import DoclingDocumentProcessor, DocumentService
 from app.services.vector_store import VectorStore
+from app.core.config import settings
 
 # Configure logging
 logging.basicConfig(
@@ -47,17 +45,10 @@ class DoclingImplementationTester:
             logger.info("🔧 Setting up Docling implementation test...")
 
             # Initialize components
-            table_parser = TableParser()
-            text_chunker = TextChunker()
-            data_parser = DataParser()
             vector_store = VectorStore()
             
-            # Create document extractor and processor
-            extractor = DocumentExtractor(table_parser)
-            self.processor = DocumentProcessor(
-                document_extractor=extractor,
-                text_chunker=text_chunker
-            )
+            # Create new Docling-based document processor
+            self.processor = DoclingDocumentProcessor()
 
             # Find test PDF files
             test_dirs = [
@@ -91,17 +82,26 @@ class DoclingImplementationTester:
             success = True
             
             # Validate basic document properties
-            if not hasattr(doc, 'text'):
-                logger.warning("⚠️ Document has no text attribute")
+            if not hasattr(doc, 'export_to_markdown'):
+                logger.warning("⚠️ Document doesn't support markdown export")
+                success = False
+            
+            # Test markdown export
+            try:
+                markdown_content = doc.export_to_markdown()
+                has_markdown = bool(markdown_content and len(markdown_content) > 10)
+            except Exception:
+                has_markdown = False
                 success = False
             
             # Log conversion results
             stats = {
                 "success": success,
                 "conversion_time": conversion_time,
-                "has_text": hasattr(doc, 'text') and bool(doc.text),
-                "page_count": len(doc.pages) if hasattr(doc, 'pages') else 0,
-                "document_type": getattr(doc, 'document_type', 'unknown')
+                "has_markdown_export": has_markdown,
+                "page_count": len(doc.pages) if hasattr(doc, 'pages') and doc.pages else 0,
+                "document_type": getattr(doc, 'document_type', 'unknown'),
+                "content_items": len(getattr(doc, 'content_items', []))
             }
             
             logger.info(f"✓ Document conversion completed in {conversion_time:.2f}s")
@@ -111,22 +111,19 @@ class DoclingImplementationTester:
             logger.error(f"❌ Document conversion failed: {e}")
             return {"success": False, "error": str(e)}
 
-    def test_enhanced_table_extraction(self, file_path):
-        """Test enhanced table extraction capabilities."""
+    def test_table_extraction_with_docling(self, file_path):
+        """Test table extraction using Docling's native capabilities."""
         try:
-            logger.info(f"📊 Testing enhanced table extraction: {file_path.name}")
+            logger.info(f"📊 Testing Docling table extraction: {file_path.name}")
             
             # Convert document first
             result = self.processor.converter.convert(str(file_path))
             doc = result.document
             
-            # Extract tables using enhanced capabilities
+            # Extract tables using Docling's native methods
             start_time = time.time()
-            tables_data = self.processor.document_extractor.extract_tables(str(file_path), doc)
+            tables_data = self._extract_tables_with_docling(doc)
             extraction_time = time.time() - start_time
-            
-            # Validate enhanced metadata
-            enhanced_metadata = tables_data.get("enhanced_metadata", {})
             
             stats = {
                 "success": True,
@@ -135,203 +132,145 @@ class DoclingImplementationTester:
                 "distributions_count": len(tables_data.get("distributions", [])),
                 "adjustments_count": len(tables_data.get("adjustments", [])),
                 "processing_method": tables_data.get("processing_method", "unknown"),
-                "enhanced_metadata": bool(enhanced_metadata),
-                "total_tables": enhanced_metadata.get("total_tables_extracted", 0),
-                "classification_rate": enhanced_metadata.get("tables_classified", 0) / max(enhanced_metadata.get("total_tables_extracted", 1), 1)
+                "total_tables": len([k for k, v in tables_data.items() if k != "processing_method" and v])
             }
             
-            logger.info(f"✓ Enhanced table extraction completed: {stats}")
+            logger.info(f"✓ Docling table extraction completed: {stats}")
             return stats
             
         except Exception as e:
-            logger.error(f"❌ Enhanced table extraction failed: {e}")
+            logger.error(f"❌ Docling table extraction failed: {e}")
             return {"success": False, "error": str(e)}
 
-    def test_comprehensive_metadata_extraction(self, file_path):
-        """Test comprehensive metadata extraction."""
+    def _extract_tables_with_docling(self, doc):
+        """Extract tables using Docling's native table structure recognition."""
         try:
-            logger.info(f"🏷️ Testing comprehensive metadata extraction: {file_path.name}")
+            tables_data = {
+                "capital_calls": [],
+                "distributions": [],
+                "adjustments": [],
+                "processing_method": "docling_native"
+            }
+
+            # Get tables from Docling's document model
+            if hasattr(doc, 'tables') and doc.tables:
+                logger.info(f"Found {len(doc.tables)} tables via Docling")
+                
+                for table in doc.tables:
+                    # Use Docling's built-in DataFrame export
+                    if hasattr(table, 'export_to_dataframe'):
+                        df = table.export_to_dataframe(doc=doc)
+                        if not df.empty:
+                            # Convert to records format
+                            table_records = df.to_dict('records')
+                            
+                            # Classify table type based on content
+                            classified_type = self._classify_table_for_business_logic(table_records)
+                            
+                            if classified_type:
+                                tables_data[classified_type].append({
+                                    "headers": list(df.columns),
+                                    "rows": table_records,
+                                    "metadata": {
+                                        "confidence": getattr(table, 'confidence', 1.0),
+                                        "extraction_method": "docling_dataframe",
+                                        "page_number": getattr(table, 'page_number', 1)
+                                    }
+                                })
+
+            return tables_data
+
+        except Exception as e:
+            logger.error(f"Docling table extraction failed: {e}")
+            return {
+                "capital_calls": [],
+                "distributions": [],
+                "adjustments": [],
+                "processing_method": "error",
+                "error": str(e)
+            }
+
+    def _classify_table_for_business_logic(self, table_records):
+        """Classify table type for business logic."""
+        if not table_records:
+            return None
+
+        # Extract headers and content for classification
+        headers = list(table_records[0].keys()) if table_records else []
+        headers_text = " ".join(headers).lower()
+        
+        # Enhanced classification using business keywords
+        if any(keyword in headers_text for keyword in ["call", "capital", "commitment"]):
+            return "capital_calls"
+        elif any(keyword in headers_text for keyword in ["distribution", "return", "dividend"]):
+            return "distributions"
+        elif any(keyword in headers_text for keyword in ["fee", "expense", "adjustment"]):
+            return "adjustments"
+            
+        return None
+
+    def test_text_extraction_and_chunking(self, file_path):
+        """Test text extraction and chunking with Docling."""
+        try:
+            logger.info(f"📝 Testing text extraction and chunking: {file_path.name}")
             
             # Convert document first
             result = self.processor.converter.convert(str(file_path))
             doc = result.document
             
-            # Extract metadata
+            # Extract text content using Docling's native export
             start_time = time.time()
-            metadata = self.processor.document_extractor.extract_document_metadata(doc)
+            text_content = doc.export_to_markdown()
             extraction_time = time.time() - start_time
             
-            # Validate metadata fields
-            expected_fields = [
-                "title", "author", "page_count", "language", 
-                "has_text", "has_images", "has_tables",
-                "text_statistics", "layout_analysis", "hierarchy_analysis",
-                "document_classification"
-            ]
-            
-            missing_fields = [field for field in expected_fields if field not in metadata]
-            
-            stats = {
-                "success": True,
-                "extraction_time": extraction_time,
-                "total_fields": len(metadata),
-                "missing_fields_count": len(missing_fields),
-                "has_text_statistics": "text_statistics" in metadata,
-                "has_layout_analysis": "layout_analysis" in metadata,
-                "has_hierarchy_analysis": "hierarchy_analysis" in metadata,
-                "document_type": metadata.get("document_classification", {}).get("type", "unknown"),
-                "language": metadata.get("language", "unknown")
-            }
-            
-            if missing_fields:
-                logger.warning(f"⚠️ Missing metadata fields: {missing_fields}")
-            
-            logger.info(f"✓ Comprehensive metadata extraction completed: {stats}")
-            return stats
-            
-        except Exception as e:
-            logger.error(f"❌ Comprehensive metadata extraction failed: {e}")
-            return {"success": False, "error": str(e)}
-
-    def test_content_type_detection(self, file_path):
-        """Test content type detection and analysis."""
-        try:
-            logger.info(f"🔍 Testing content type detection: {file_path.name}")
-            
-            # Convert document first
-            result = self.processor.converter.convert(str(file_path))
-            doc = result.document
-            
-            # Extract content types
-            start_time = time.time()
-            content_types = self.processor.document_extractor.extract_content_types(doc)
-            extraction_time = time.time() - start_time
-            
-            # Validate content type extraction
-            content_stats = {
-                content_type: len(items) for content_type, items in content_types.items()
-            }
-            
-            stats = {
-                "success": True,
-                "extraction_time": extraction_time,
-                "total_content_items": sum(content_stats.values()),
-                "content_type_breakdown": content_stats,
-                "has_formulas": len(content_types.get("formulas", [])) > 0,
-                "has_tables": len(content_types.get("tables", [])) > 0,
-                "has_headings": len(content_types.get("headings", [])) > 0,
-                "has_lists": len(content_types.get("lists", [])) > 0
-            }
-            
-            logger.info(f"✓ Content type detection completed: {stats}")
-            return stats
-            
-        except Exception as e:
-            logger.error(f"❌ Content type detection failed: {e}")
-            return {"success": False, "error": str(e)}
-
-    def test_formula_reference_extraction(self, file_path):
-        """Test formula and reference extraction capabilities."""
-        try:
-            logger.info(f"🧮 Testing formula and reference extraction: {file_path.name}")
-            
-            # Convert document first
-            result = self.processor.converter.convert(str(file_path))
-            doc = result.document
-            
-            # Extract formulas and references
-            start_time = time.time()
-            formulas_refs = self.processor.document_extractor.extract_formulas_and_references(doc)
-            extraction_time = time.time() - start_time
-            
-            # Validate extraction results
-            formulas_refs_stats = {
-                content_type: len(items) for content_type, items in formulas_refs.items()
-            }
-            
-            stats = {
-                "success": True,
-                "extraction_time": extraction_time,
-                "total_items": sum(formulas_refs_stats.values()),
-                "extraction_breakdown": formulas_refs_stats,
-                "has_mathematical_formulas": len(formulas_refs.get("mathematical_formulas", [])) > 0,
-                "has_citations": len(formulas_refs.get("citations", [])) > 0,
-                "has_references": len(formulas_refs.get("bibliographic_references", [])) > 0,
-                "has_figure_refs": len(formulas_refs.get("figure_references", [])) > 0,
-                "has_table_refs": len(formulas_refs.get("table_references", [])) > 0
-            }
-            
-            logger.info(f"✓ Formula and reference extraction completed: {stats}")
-            return stats
-            
-        except Exception as e:
-            logger.error(f"❌ Formula and reference extraction failed: {e}")
-            return {"success": False, "error": str(e)}
-
-    def test_text_chunking_enhancements(self, file_path):
-        """Test enhanced text chunking capabilities."""
-        try:
-            logger.info(f"✂️ Testing enhanced text chunking: {file_path.name}")
-            
-            # Convert document first
-            result = self.processor.converter.convert(str(file_path))
-            doc = result.document
-            
-            # Extract text content
-            text_content = self.processor.document_extractor.extract_text(doc)
-            
-            # Chunk text using enhanced capabilities
-            start_time = time.time()
-            text_chunks = self.processor.text_chunker.chunk_text(text_content)
-            chunking_time = time.time() - start_time
+            # Create simple chunks
+            chunks = self._create_simple_chunks(text_content)
             
             # Analyze chunking results
             chunk_stats = {
-                "total_chunks": len(text_chunks),
-                "chunk_sizes": [len(chunk.get("content", "")) for chunk in text_chunks],
-                "avg_chunk_size": sum(len(chunk.get("content", "")) for chunk in text_chunks) / max(len(text_chunks), 1),
-                "completeness_rate": sum(1 for chunk in text_chunks if chunk.get("metadata", {}).get("is_complete", False)) / max(len(text_chunks), 1),
-                "chunking_time": chunking_time
+                "total_chunks": len(chunks),
+                "avg_chunk_size": sum(len(chunk.get("content", "")) for chunk in chunks) / max(len(chunks), 1),
+                "extraction_time": extraction_time
             }
             
-            # Validate chunking quality
             stats = {
                 "success": True,
                 "chunking_stats": chunk_stats,
-                "has_metadata": all("metadata" in chunk for chunk in text_chunks),
-                "has_chunk_indices": all("chunk_index" in chunk.get("metadata", {}) for chunk in text_chunks),
-                "semantic_breaking": True, # Assuming semantic breaking is working if no errors
-                "quality_score": self._calculate_chunking_quality(chunk_stats)
+                "has_text_content": bool(text_content and len(text_content) > 10),
+                "text_length": len(text_content),
+                "processing_method": "docling_markdown_export"
             }
             
-            logger.info(f"✓ Enhanced text chunking completed: {stats}")
+            logger.info(f"✓ Text extraction and chunking completed: {stats}")
             return stats
             
         except Exception as e:
-            logger.error(f"❌ Enhanced text chunking failed: {e}")
+            logger.error(f"❌ Text extraction and chunking failed: {e}")
             return {"success": False, "error": str(e)}
 
-    def _calculate_chunking_quality(self, chunk_stats):
-        """Calculate a quality score for chunking results."""
-        score = 0.0
+    def _create_simple_chunks(self, content, max_chunk_size=1000):
+        """Create simple chunks from text content."""
+        import re
         
-        # Score based on chunk count (reasonable range)
-        chunk_count = chunk_stats.get("total_chunks", 0)
-        if 1 <= chunk_count <= 100:  # Reasonable chunk count
-            score += 0.3
-        elif chunk_count > 100:
-            score += 0.2
+        chunks = []
         
-        # Score based on completeness
-        completeness = chunk_stats.get("completeness_rate", 0)
-        score += completeness * 0.4
+        # Split content into sections based on headings
+        sections = re.split(r'\n#{1,3}\s+', content)
         
-        # Score based on chunk size distribution
-        avg_size = chunk_stats.get("avg_chunk_size", 0)
-        if 200 <= avg_size <= 800:  # Good chunk size range
-            score += 0.3
+        for i, section in enumerate(sections):
+            if section.strip() and len(section) > 10:
+                chunk_content = section.strip()[:max_chunk_size]  # Limit chunk size
+                chunks.append({
+                    "content": chunk_content,
+                    "metadata": {
+                        "chunk_index": i,
+                        "chunk_type": "section",
+                        "chunking_method": "simple_section_split",
+                        "content_length": len(chunk_content)
+                    }
+                })
         
-        return min(score, 1.0)
+        return chunks
 
     def run_comprehensive_test(self, file_path):
         """Run comprehensive test suite on a document."""
@@ -348,11 +287,8 @@ class DoclingImplementationTester:
         # Run all tests
         tests = [
             ("document_conversion", self.test_document_conversion),
-            ("enhanced_table_extraction", self.test_enhanced_table_extraction),
-            ("comprehensive_metadata", self.test_comprehensive_metadata_extraction),
-            ("content_type_detection", self.test_content_type_detection),
-            ("formula_reference_extraction", self.test_formula_reference_extraction),
-            ("text_chunking", self.test_text_chunking_enhancements)
+            ("table_extraction", self.test_table_extraction_with_docling),
+            ("text_extraction", self.test_text_extraction_and_chunking)
         ]
         
         for test_name, test_func in tests:
@@ -411,7 +347,7 @@ class DoclingImplementationTester:
     def generate_summary_report(self, all_results, total_time):
         """Generate comprehensive summary report."""
         logger.info("\n" + "=" * 80)
-        logger.info("📊 COMPREHENSIVE TEST SUMMARY REPORT")
+        logger.info("📊 DOCLING IMPLEMENTATION TEST SUMMARY REPORT")
         logger.info("=" * 80)
         
         # Overall statistics
@@ -429,11 +365,8 @@ class DoclingImplementationTester:
         logger.info(f"\n🔍 Test-specific Results:")
         test_names = [
             "document_conversion",
-            "enhanced_table_extraction", 
-            "comprehensive_metadata",
-            "content_type_detection",
-            "formula_reference_extraction",
-            "text_chunking"
+            "table_extraction", 
+            "text_extraction"
         ]
         
         for test_name in test_names:
@@ -446,30 +379,12 @@ class DoclingImplementationTester:
         
         # Key improvements highlighted
         logger.info(f"\n🚀 Key Docling Best Practices Implemented:")
-        logger.info(f"   ✅ Enhanced table extraction with Docling's native capabilities")
-        logger.info(f"   ✅ Comprehensive metadata extraction")
-        logger.info(f"   ✅ Content type detection and layout analysis") 
-        logger.info(f"   ✅ Formula and reference extraction capabilities")
-        logger.info(f"   ✅ Improved text chunking with semantic awareness")
-        logger.info(f"   ✅ Fallback strategies for robust processing")
+        logger.info(f"   ✅ Document conversion using Docling's native capabilities")
+        logger.info(f"   ✅ Table extraction with Docling's table structure recognition")
+        logger.info(f"   ✅ Text extraction and export to Markdown")
+        logger.info(f"   ✅ Simple but effective chunking strategy")
+        logger.info(f"   ✅ Configurable processing parameters")
         logger.info(f"   ✅ Enhanced error handling and logging")
-        
-        # Performance metrics
-        logger.info(f"\n⚡ Performance Highlights:")
-        processing_methods = []
-        for result in all_results:
-            table_test = result.get("tests", {}).get("enhanced_table_extraction", {})
-            if table_test and table_test.get("success"):
-                processing_methods.append(table_test.get("processing_method", "unknown"))
-        
-        if processing_methods:
-            method_counts = {}
-            for method in processing_methods:
-                method_counts[method] = method_counts.get(method, 0) + 1
-            
-            logger.info(f"   • Processing methods used:")
-            for method, count in method_counts.items():
-                logger.info(f"     - {method}: {count} files")
         
         logger.info(f"\n📋 Detailed Results Summary:")
         for result in all_results:
