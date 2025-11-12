@@ -61,7 +61,7 @@ class Settings(BaseSettings):
 
     # RAG
     TOP_K_RESULTS: int = 5
-    SIMILARITY_THRESHOLD: float = 0.7
+    SIMILARITY_THRESHOLD: float = 0.3
     
     class Config:
         env_file = ".env"

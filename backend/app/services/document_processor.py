@@ -176,9 +176,9 @@ class DocumentExtractor:
 class TextChunker:
     """Responsible for chunking text content with semantic awareness."""
 
-    def __init__(self, chunk_size: int = 500, chunk_overlap: int = 20):
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
+    def __init__(self, chunk_size: Optional[int] = None, chunk_overlap: Optional[int] = None):
+        self.chunk_size = chunk_size or int(os.getenv('CHUNK_SIZE', settings.CHUNK_SIZE))
+        self.chunk_overlap = chunk_overlap or int(os.getenv('CHUNK_OVERLAP', settings.CHUNK_OVERLAP))
 
     def chunk_text(self, text_content: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Chunk text content into manageable pieces with semantic awareness."""
@@ -781,7 +781,10 @@ class DocumentProcessor:
     ):
         # Dependency injection with defaults
         self.document_extractor = document_extractor or DocumentExtractor(TableParser())
-        self.text_chunker = text_chunker or TextChunker()
+        self.text_chunker = text_chunker or TextChunker(
+            chunk_size=settings.CHUNK_SIZE,
+            chunk_overlap=settings.CHUNK_OVERLAP
+        )
         # Pass database session to avoid None errors in Celery context
         self.data_storer = data_storer or DataStorer(VectorStore(db_session), DataParser())
         self.converter = converter or self._initialize_converter()

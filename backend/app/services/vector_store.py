@@ -374,7 +374,8 @@ class VectorStore:
         self,
         query: str,
         k: int = 5,
-        filter_metadata: Optional[Dict[str, Any]] = None
+        filter_metadata: Optional[Dict[str, Any]] = None,
+        similarity_threshold: Optional[float] = None
     ) -> List[Dict[str, Any]]:
         """
         Search for similar documents using cosine similarity.
@@ -389,6 +390,7 @@ class VectorStore:
             query: Search query text
             k: Number of results to return (default: 5)
             filter_metadata: Optional metadata filters (e.g., {"fund_id": 1})
+            similarity_threshold: Minimum similarity score (0.0-1.0)
 
         Returns:
             List of similar documents with similarity scores
@@ -421,6 +423,14 @@ class VectorStore:
 
                 where_clause = " AND ".join(where_conditions) if where_conditions else ""
 
+                # Build threshold condition
+                threshold_condition = ""
+                if similarity_threshold is not None and similarity_threshold > 0:
+                    # Use WHERE if no other conditions, otherwise AND
+                    condition_prefix = "WHERE" if not where_clause else "AND"
+                    threshold_condition = f" {condition_prefix} 1 - (embedding <=> (:embedding)::vector) >= :threshold"
+                    params["threshold"] = similarity_threshold
+
                 # Search using pgvector cosine similarity
                 # <=> operator returns cosine distance, so we order by it ascending
                 # Use proper vector syntax for pgvector
@@ -433,7 +443,7 @@ class VectorStore:
                         metadata,
                         1 - (embedding <=> (:embedding)::vector) as similarity_score
                     FROM document_embeddings
-                    {f"WHERE {where_clause}" if where_clause else ""}
+                    {f"WHERE {where_clause}" if where_clause else ""}{threshold_condition}
                     ORDER BY embedding <=> (:embedding)::vector
                     LIMIT :k
                 """)
@@ -477,20 +487,21 @@ class VectorStore:
             except Exception as e:
                 logger.error(f"Error in similarity search: {e}")
                 return []
-
     def similarity_search_sync(
         self,
         query: str,
         k: int = 5,
-        filter_metadata: Optional[Dict[str, Any]] = None
+        filter_metadata: Optional[Dict[str, Any]] = None,
+        similarity_threshold: Optional[float] = None
     ) -> List[Dict[str, Any]]:
         """
-        Synchronous version of similarity_search for API endpoints.
+        Synchronous version of similarity_search for Celery.
 
         Args:
             query: Search query text
             k: Number of results to return (default: 5)
             filter_metadata: Optional metadata filters
+            similarity_threshold: Minimum similarity score (0.0-1.0)
 
         Returns:
             List of similar documents with similarity scores
@@ -519,6 +530,14 @@ class VectorStore:
 
             where_clause = " AND ".join(where_conditions) if where_conditions else ""
 
+            # Build threshold condition
+            threshold_condition = ""
+            if similarity_threshold is not None and similarity_threshold > 0:
+                # Use WHERE if no other conditions, otherwise AND
+                condition_prefix = "WHERE" if not where_clause else "AND"
+                threshold_condition = f" {condition_prefix} 1 - (embedding <=> (:embedding)::vector) >= :threshold"
+                params["threshold"] = similarity_threshold
+
             # Search using pgvector cosine similarity
             search_sql = text(f"""
                 SELECT
@@ -530,6 +549,7 @@ class VectorStore:
                     1 - (embedding <=> (:embedding)::vector) as similarity_score
                 FROM document_embeddings
                 {f"WHERE {where_clause}" if where_clause else ""}
+                {threshold_condition}
                 ORDER BY embedding <=> (:embedding)::vector
                 LIMIT :k
             """)

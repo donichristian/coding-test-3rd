@@ -111,7 +111,8 @@ class ContextRetriever:
         self,
         query: str,
         fund_id: Optional[int] = None,
-        k: int = 5
+        k: Optional[int] = None,
+        similarity_threshold: Optional[float] = None
     ) -> List[Dict[str, Any]]:
         """
         Synchronous version of retrieve for API endpoints.
@@ -120,17 +121,25 @@ class ContextRetriever:
             query: Search query
             fund_id: Optional fund filter
             k: Number of results
+            similarity_threshold: Minimum similarity score
 
         Returns:
             List of relevant documents
         """
         try:
+            # Use environment variables or config values if not provided
+            import os
+            k = k or int(os.getenv('TOP_K_RESULTS', settings.TOP_K_RESULTS))
+            similarity_threshold = similarity_threshold or float(os.getenv('SIMILARITY_THRESHOLD', settings.SIMILARITY_THRESHOLD))
+
             filter_metadata = {"fund_id": fund_id} if fund_id else None
             results = self.vector_store.similarity_search_sync(
                 query=query,
                 k=k,
-                filter_metadata=filter_metadata
+                filter_metadata=filter_metadata,
+                similarity_threshold=similarity_threshold
             )
+
             logger.debug(f"Retrieved {len(results)} documents for query: {query[:50]}...")
             return results
         except Exception as e:
@@ -522,7 +531,15 @@ class RAGEngine:
                 logger.info("Enhanced query with conversation context")
 
             # Step 3: Retrieve context
-            retrieved_docs = self.context_retriever.retrieve_sync(enhanced_query, fund_id)
+            import os
+            top_k = int(os.getenv('TOP_K_RESULTS', settings.TOP_K_RESULTS))
+            similarity_thresh = float(os.getenv('SIMILARITY_THRESHOLD', settings.SIMILARITY_THRESHOLD))
+            retrieved_docs = self.context_retriever.retrieve_sync(
+                enhanced_query,
+                fund_id,
+                k=top_k,
+                similarity_threshold=similarity_thresh
+            )
             logger.info(f"Retrieved {len(retrieved_docs)} document chunks")
 
             # Step 4: Get metrics data
