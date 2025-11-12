@@ -203,13 +203,13 @@ class ContextFormatter:
                     context_parts.append(f"- {key}: {value}")
             context_parts.append("")
 
-        # Add retrieved document chunks with clean citations
+        # Add retrieved document chunks with citations
         if retrieved_docs:
             context_parts.append("Relevant Document Information:")
             for i, doc in enumerate(retrieved_docs[:3], 1):  # Limit to top 3
                 content = doc.get("content", "").strip()
                 if content and len(content) < 1000:  # Reasonable chunk size
-                    # Create clean citation without chunk details
+                    # Create citation without chunk details
                     metadata = doc.get("metadata", {})
                     citation = ContextFormatter._create_clean_citation(metadata)
 

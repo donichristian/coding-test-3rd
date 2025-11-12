@@ -34,7 +34,7 @@ celery_app.conf.update(
     worker_max_tasks_per_child=50,  # Restart worker after 50 tasks
 )
 
-# Global model cache for Celery workers
+# Global model cache for Celery workers (legacy - now uses shared global cache)
 _model_cache = {}
 
 @worker_process_init.connect
@@ -42,80 +42,45 @@ def preload_models_on_worker_init(sender, **kwargs):
     """
     Pre-load ML models when Celery worker starts.
 
-    This ensures models are cached in each worker process,
-    avoiding runtime downloads and improving performance.
+    This ensures models are downloaded during Docker build to avoid runtime downloads.
+    Uses preload_models.py for actual loading logic.
     """
     try:
         logger.info("Pre-loading ML models in Celery worker...")
-
-        # Pre-load sentence-transformers model
-        try:
-            from sentence_transformers import SentenceTransformer
-            logger.info("Loading sentence-transformers model...")
-
-            # Check if model is already cached from Docker build
-            import os
-            model_path = os.path.expanduser("~/.cache/torch/sentence_transformers/all-MiniLM-L6-v2")
-            if os.path.exists(model_path):
-                logger.info("✓ Using pre-cached sentence-transformers model from Docker build")
-            else:
-                logger.info("Downloading sentence-transformers model...")
-
-            model = SentenceTransformer('all-MiniLM-L6-v2')
-
-            # Test the model to ensure it's working
-            test_embedding = model.encode("test sentence")
-            if test_embedding is not None and len(test_embedding) == 384:
-                _model_cache['sentence_transformers'] = model
-                logger.info("✓ Sentence-transformers model loaded and tested successfully")
-            else:
-                logger.warning("Sentence-transformers model test failed")
-        except Exception as e:
-            logger.warning(f"Failed to pre-load sentence-transformers: {e}")
-
-        # Pre-load docling converter (this will cache RapidOCR models)
-        try:
-            from docling.document_converter import DocumentConverter
-            from docling.datamodel.pipeline_options import PdfPipelineOptions
-            from docling.document_converter import PdfFormatOption
-            from docling.datamodel.base_models import InputFormat
-
-            logger.info("Loading Docling converter with OCR...")
-            pipeline_options = PdfPipelineOptions()
-            pipeline_options.do_ocr = True
-            pipeline_options.do_table_structure = True
-
-            _model_cache['docling_converter'] = DocumentConverter(
-                format_options={
-                    InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
-                }
-            )
-            logger.info("✓ Docling converter loaded successfully")
-        except Exception as e:
-            logger.warning(f"Failed to pre-load Docling converter: {e}")
-
-        # Verify RapidOCR models are cached
-        try:
-            import os
-            rapidocr_dir = "/usr/local/lib/python3.11/site-packages/rapidocr/models"
-            if os.path.exists(rapidocr_dir):
-                model_files = [
-                    "ch_PP-OCRv4_det_infer.pth",
-                    "ch_ptocr_mobile_v2.0_cls_infer.pth",
-                    "ch_PP-OCRv4_rec_infer.pth"
-                ]
-                found = sum(1 for f in model_files if os.path.exists(os.path.join(rapidocr_dir, f)))
-                logger.info(f"✓ Found {found}/{len(model_files)} RapidOCR model files cached")
-        except Exception as e:
-            logger.debug(f"Could not verify RapidOCR models: {e}")
-
-        logger.info("✓ Model pre-loading complete in Celery worker")
+        
+        # Import preload functions
+        import sys
+        import os
+        sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+        from preload_models import preload_sentence_transformers, preload_docling_models, preload_rapidocr_models
+        
+        # Run preloading
+        results = {
+            "sentence_transformers": preload_sentence_transformers(),
+            "docling": preload_docling_models(),
+            "rapidocr": preload_rapidocr_models(),
+        }
+        
+        # Log results
+        for model_name, success in results.items():
+            status = "✓" if success else "✗"
+            logger.info(f"{status} {model_name} model preloading in Celery worker")
 
     except Exception as e:
         logger.error(f"Failed to pre-load models in worker: {e}")
 
 def get_cached_model(model_name: str):
     """Get a cached model instance."""
+    # Try global cache first, then fallback to local cache
+    try:
+        from app.core.model_cache import get_cached_model as get_global_model
+        model = get_global_model(model_name)
+        if model is not None:
+            return model
+    except ImportError:
+        pass
+    
+    # Fallback to local cache
     return _model_cache.get(model_name)
 
 # For development - allows running celery from command line

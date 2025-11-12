@@ -130,16 +130,16 @@ class VectorStore:
     def _init_sentence_transformers(self) -> bool:
         """Initialize sentence-transformers model."""
         try:
-            # First try to get from Celery cache
+            # First try to get from global cache
             try:
-                from app.core.celery_app import get_cached_model
-                cached_model = get_cached_model('sentence_transformers')
-                if cached_model is not None:
-                    logger.info("Using cached sentence-transformers model from Celery")
+                from app.core.model_cache import get_cached_model, is_model_cached
+                if is_model_cached('sentence_transformers'):
+                    cached_model = get_cached_model('sentence_transformers')
+                    logger.info("Using cached sentence-transformers model from global cache")
                     self._embedding_model = cached_model
                     return True
             except ImportError:
-                pass  # Not in Celery context
+                pass  # Global cache not available
 
             # Fallback: initialize model normally
             from sentence_transformers import SentenceTransformer
@@ -154,6 +154,15 @@ class VectorStore:
                 logger.info("Downloading sentence-transformers model...")
 
             self._embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+            
+            # Cache the model globally for reuse
+            try:
+                from app.core.model_cache import set_cached_model
+                set_cached_model('sentence_transformers', self._embedding_model)
+                logger.info("✓ Sentence-transformers model cached globally")
+            except ImportError:
+                logger.debug("Global cache not available in current context")
+            
             logger.info("✓ Sentence-transformers model initialized successfully")
             return True
         except ImportError:

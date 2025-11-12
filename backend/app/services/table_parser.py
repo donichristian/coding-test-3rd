@@ -74,7 +74,7 @@ class DoclingTableExtractor:
             from docling.datamodel.pipeline_options import PdfPipelineOptions
             
             pipeline_options = PdfPipelineOptions()
-            pipeline_options.do_ocr = False  # Not needed for table extraction
+            pipeline_options.do_ocr = False
             pipeline_options.do_table_structure = True
             
             return DocumentConverter(

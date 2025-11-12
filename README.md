@@ -69,7 +69,7 @@ This repository contains a **project scaffold** to help you get started quickly:
 The following **core functionalities are NOT implemented** and need to be built by you:
 
 #### 1. Document Processing Pipeline (Phase 2) - **CRITICAL**
-- [ ] PDF parsing with Docling and pdfplumber fallback
+- [ ] PDF parsing with pdfplumber (integrate and test)
 - [ ] Table detection and extraction logic
 - [ ] Intelligent table classification (capital calls vs distributions vs adjustments)
 - [ ] Data validation and cleaning
@@ -77,8 +77,8 @@ The following **core functionalities are NOT implemented** and need to be built 
 - [ ] Background task processing (Celery integration)
 
 **Files implemented:**
-- `backend/app/services/document_processor.py` - Document processing with Docling
-- `backend/app/services/table_parser.py` - Table extraction and classification
+- `backend/app/services/document_processor.py` (skeleton provided)
+- `backend/app/services/table_parser.py` (needs implementation)
 
 #### 2. Vector Store & RAG System (Phase 3) - **CRITICAL**
 - [ ] Text chunking strategy implementation
@@ -726,13 +726,6 @@ curl -X POST "http://localhost:8000/api/chat/query" \
 
 ## Troubleshooting
 
-### Model Download Issues
-**Problem**: Document processing is slow on first upload
-**Solution**: 
-- Ensure models were pre-loaded during Docker build (check build logs for "Model pre-loading complete")
-- Rebuild the Docker image: `make dev-build` or `make prod-build`
-- Models are cached in the Docker image, so subsequent uploads should be fast
-
 ### Document Parsing Issues
 **Problem**: Docling can't extract tables
 **Solution**: 
@@ -761,14 +754,6 @@ curl -X POST "http://localhost:8000/api/chat/query" \
 - Add CORS middleware in FastAPI
 - Allow origin: http://localhost:3000
 - Check network configuration in Docker
-
-### Slow Document Processing
-**Problem**: Document upload takes too long (>30 seconds)
-**Solution**:
-- Verify models were pre-loaded: Check Docker build logs for "Model pre-loading complete"
-- Rebuild images if models weren't pre-loaded: `make dev-build` or `make prod-build`
-- Check network connectivity (models download from external sources during build)
-- Processing should be fast (2-5 seconds) once models are cached
 
 ---
 

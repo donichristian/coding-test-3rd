@@ -369,11 +369,6 @@ function MessageBubble({ message, onRetry, isLoading }: {
                           {source.citation_text || source.document_name || `Source ${idx + 1}`}
                         </span>
                       </div>
-                      {source.confidence_score && (
-                        <span className="text-green-600 font-medium">
-                          {(source.confidence_score * 100).toFixed(0)}% confidence
-                        </span>
-                      )}
                     </div>
 
                     {/* Source Content */}
