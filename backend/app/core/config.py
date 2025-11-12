@@ -2,7 +2,7 @@
 Application configuration
 """
 import os
-from typing import List
+from typing import List, Dict, Any
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
 
@@ -62,7 +62,26 @@ class Settings(BaseSettings):
     # RAG
     TOP_K_RESULTS: int = 5
     SIMILARITY_THRESHOLD: float = 0.3
-    
+
+    # Embedding Configurations
+    EMBEDDING_CONFIGS: Dict[str, Dict[str, Any]] = {
+        "sentence-transformers": {
+            "model": "all-MiniLM-L6-v2",
+            "dimensions": 384,
+            "description": "Local sentence-transformers model"
+        },
+        "gemini": {
+            "model": "gemini-embedding-001",
+            "dimensions": 768,
+            "description": "Google Gemini embeddings"
+        },
+        "openai": {
+            "model": "text-embedding-3-small",
+            "dimensions": 1536,
+            "description": "OpenAI embeddings"
+        }
+    }
+
     class Config:
         env_file = ".env"
         case_sensitive = True

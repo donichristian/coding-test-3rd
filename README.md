@@ -293,7 +293,7 @@ CREATE TABLE documents (
 - Docker & Docker Compose
 - Node.js 18+ (for local frontend development)
 - Python 3.11+ (for local backend development)
-- OpenAI API key (or use free alternatives - see below)
+- GEMINI_API_KEY (primary) or OPENAI_API_KEY (fallback) - see Free LLM Options below
 
 ### Quick Start
 
@@ -309,13 +309,21 @@ cd fund-analysis-system
 cp .env.example .env
 
 # Edit .env and add your API keys
-# OPENAI_API_KEY=sk-...
+# The project primarily uses GEMINI_API_KEY for LLM services, with OPENAI_API_KEY as fallback
+# GEMINI_API_KEY=...
+# OPENAI_API_KEY=... (optional, used as fallback)
 # DATABASE_URL=postgresql://user:password@localhost:5432/funddb
 ```
 
 3. **Start with Docker Compose**
 
-**Note**: The first build will take longer as it pre-downloads OCR and ML models (RapidOCR, Docling, sentence-transformers) during the Docker build process. This ensures fast document processing without runtime model downloads.
+**Note**: The first build will take longer as it pre-downloads OCR and ML models during the Docker build process. The `preload_models.py` script initializes and caches:
+
+- **Docling models** for document parsing and table extraction
+- **RapidOCR models** (3 OCR model files) for optical character recognition
+- **Sentence-transformers** `all-MiniLM-L6-v2` model for local embeddings
+
+This ensures fast document processing without runtime model downloads.
 
 #### Makefile Commands:
 ```bash
@@ -382,6 +390,43 @@ make docs             # Open API documentation
 make info             # Show environment information
 
 ```
+
+### Windows Users
+
+If you're on Windows, you can use the Makefile commands in several ways:
+
+#### Option 1: Git Bash (Recommended)
+Install [Git for Windows](https://gitforwindows.org/) which includes Git Bash, then run the `make` commands as shown above.
+
+#### Option 2: Windows Subsystem for Linux (WSL)
+Install WSL and run the commands in a Linux environment.
+
+#### Option 3: Use Docker Compose Directly
+Instead of `make` commands, you can use `docker-compose` directly:
+
+```powershell
+# Build images
+docker-compose build
+
+# Start services
+docker-compose up -d
+
+# View logs
+docker-compose logs
+
+# Stop services
+docker-compose down
+
+# Run tests
+docker-compose exec backend pytest tests/ -v
+```
+
+#### Option 4: PowerShell with Make
+If you have Make installed for Windows, you can run the commands directly in PowerShell.
+
+**Note**: The Makefile uses Unix-style commands. For full compatibility, Git Bash or WSL is recommended.
+
+---
 
 4. **Access the application**
 - Frontend: http://localhost:3000
@@ -696,13 +741,13 @@ curl -X POST "http://localhost:8000/api/chat/query" \
 
 ### Backend
 - **Framework**: FastAPI (Python 3.11+)
-- **Document Parser**: Docling
+- **Document Parser**: Docling (primary) with pdfplumber fallback
 - **Vector DB**: pgvector (PostgreSQL extension)
 - **SQL DB**: PostgreSQL 15+
 - **ORM**: SQLAlchemy
 - **LLM Framework**: LangChain
-- **LLM**: OpenAI GPT-4 or any LLM
-- **Embeddings**: OpenAI text-embedding-3-small
+- **LLM**: Google Gemini 2.5 Flash (primary) with OpenAI GPT-4 fallback
+- **Embeddings**: sentence-transformers all-MiniLM-L6-v2 (primary, local) with gemini-embedding-001 and OpenAI text-embedding-3-small fallbacks
 - **Task Queue**: Celery + Redis
 
 ### Frontend

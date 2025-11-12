@@ -42,24 +42,6 @@ class VectorStore:
     - Metadata filtering for search
     """
 
-    # Embedding model configurations
-    EMBEDDING_CONFIGS = {
-        "sentence-transformers": {
-            "model": "all-MiniLM-L6-v2",
-            "dimensions": 384,
-            "description": "Local sentence-transformers model"
-        },
-        "gemini": {
-            "model": "gemini-embedding-001",
-            "dimensions": 768,
-            "description": "Google Gemini embeddings"
-        },
-        "openai": {
-            "model": "text-embedding-3-small",
-            "dimensions": 1536,
-            "description": "OpenAI embeddings"
-        }
-    }
 
     def __init__(self, db: Optional[Session] = None):
         """
@@ -69,8 +51,9 @@ class VectorStore:
             db: SQLAlchemy session (creates new one if None)
         """
         self.db = db
+        self.embedding_configs = settings.EMBEDDING_CONFIGS
         self.embedding_provider = self._initialize_embeddings()
-        self.embedding_dimensions = self.EMBEDDING_CONFIGS.get(
+        self.embedding_dimensions = self.embedding_configs.get(
             self.embedding_provider, {"dimensions": 384}
         )["dimensions"]
 
@@ -117,7 +100,7 @@ class VectorStore:
         for provider_name, init_func in providers:
             try:
                 if init_func():
-                    config = self.EMBEDDING_CONFIGS[provider_name]
+                    config = self.embedding_configs[provider_name]
                     logger.info(f"✓ Using {provider_name} embeddings: {config['description']}")
                     return provider_name
             except Exception as e:
