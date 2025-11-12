@@ -48,31 +48,6 @@ def preload_models_on_worker_init(sender, **kwargs):
     try:
         logger.info("Pre-loading ML models in Celery worker...")
 
-        # Pre-load sentence-transformers model
-        try:
-            from sentence_transformers import SentenceTransformer
-            logger.info("Loading sentence-transformers model...")
-
-            # Check if model is already cached from Docker build
-            import os
-            model_path = os.path.expanduser("~/.cache/torch/sentence_transformers/all-MiniLM-L6-v2")
-            if os.path.exists(model_path):
-                logger.info("✓ Using pre-cached sentence-transformers model from Docker build")
-            else:
-                logger.info("Downloading sentence-transformers model...")
-
-            model = SentenceTransformer('all-MiniLM-L6-v2')
-
-            # Test the model to ensure it's working
-            test_embedding = model.encode("test sentence")
-            if test_embedding is not None and len(test_embedding) == 384:
-                _model_cache['sentence_transformers'] = model
-                logger.info("✓ Sentence-transformers model loaded and tested successfully")
-            else:
-                logger.warning("Sentence-transformers model test failed")
-        except Exception as e:
-            logger.warning(f"Failed to pre-load sentence-transformers: {e}")
-
         # Pre-load docling converter (this will cache RapidOCR models)
         try:
             from docling.document_converter import DocumentConverter
@@ -108,6 +83,15 @@ def preload_models_on_worker_init(sender, **kwargs):
                 logger.info(f"✓ Found {found}/{len(model_files)} RapidOCR model files cached")
         except Exception as e:
             logger.debug(f"Could not verify RapidOCR models: {e}")
+
+        # Pre-load sentence-transformers model
+        try:
+            from sentence_transformers import SentenceTransformer
+            logger.info("Loading sentence-transformers model...")
+            _model_cache['sentence_transformers'] = SentenceTransformer('all-MiniLM-L6-v2')
+            logger.info("✓ Sentence-transformers model loaded successfully")
+        except Exception as e:
+            logger.warning(f"Failed to pre-load sentence-transformers model: {e}")
 
         logger.info("✓ Model pre-loading complete in Celery worker")
 

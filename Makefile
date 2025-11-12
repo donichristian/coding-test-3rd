@@ -307,6 +307,14 @@ test-backend-cov: ## Run backend tests with coverage
 	@echo "Running backend tests with coverage..."
 	docker compose exec backend pytest app/services/test/ --cov=app --cov-report=html --cov-report=term
 
+test-document-processor: ## Run document processor unit tests
+	@echo "Running document processor unit tests..."
+	docker compose exec backend pytest app/services/test/test_document_processor.py -v
+
+test-query-engine: ## Run query engine unit tests
+	@echo "Running query engine unit tests..."
+	docker compose exec backend pytest app/services/test/test_query_engine.py -v
+
 test-frontend: ## Run frontend tests
 	@echo "Running frontend tests..."
 	docker compose exec frontend npm test

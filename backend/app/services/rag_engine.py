@@ -131,7 +131,7 @@ class ContextRetriever:
                 k=k,
                 filter_metadata=filter_metadata
             )
-            logger.debug(f"Retrieved {len(results)} documents for query: {query[:50]}...")
+            logger.info(f"Retrieved {len(results)} document chunks")
             return results
         except Exception as e:
             logger.error(f"Context retrieval failed: {e}")

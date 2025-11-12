@@ -46,7 +46,7 @@ class QueryEngine:
         # If no context was retrieved, try synchronous retrieval
         if not result.get("sources") or len(result.get("sources", [])) == 0:
             try:
-                sync_results = self.rag_engine.retrieve_sync(query, fund_id)
+                sync_results = self.rag_engine.context_retriever.retrieve_sync(query, fund_id)
                 if sync_results:
                     result["sources"] = sync_results
                     result["context_used"] = True

@@ -11,7 +11,6 @@ from typing import Dict, List, Any, Optional, Protocol
 import asyncio
 import logging
 import os
-import re
 import time
 from datetime import datetime
 from contextlib import asynccontextmanager
@@ -24,6 +23,8 @@ from docling.datamodel.base_models import InputFormat
 from app.core.config import settings
 from app.services.table_parser import TableParser
 from app.services.vector_store import VectorStore
+from app.services.data_parser import DataParser
+from app.services.text_chunker import TextChunker
 from app.db.session import SessionLocal
 from app.models.transaction import CapitalCall, Distribution, Adjustment
 from sqlalchemy.orm import Session
@@ -124,417 +125,926 @@ class DataParserProtocol(Protocol):
 
 class DocumentExtractor:
     """Responsible for extracting content from documents."""
-    
+
     def __init__(self, table_parser: TableParser):
         self.table_parser = table_parser
-    
+
     def extract_text(self, doc) -> List[Dict[str, Any]]:
-        """Extract text content from docling document."""
+        """Extract text content from docling document with enhanced metadata."""
         try:
             text_content = []
+
+            # Method 1: Extract structured text content with hierarchy
+            if hasattr(doc, 'content_items') and doc.content_items:
+                text_items = self._extract_structured_text(doc)
+                text_content.extend(text_items)
             
-            # Primary method: direct text extraction
-            if hasattr(doc, 'text') and doc.text:
+            # Method 2: Extract entire document text
+            elif hasattr(doc, 'text') and doc.text:
                 text_content.append({
                     "page": 1,
                     "content": doc.text,
-                    "type": "document_text"
+                    "type": "document_text",
+                    "metadata": self._extract_text_metadata(doc)
                 })
+            
+            # Method 3: Fallback to markdown export
             else:
-                # Fallback: markdown export
                 markdown_content = doc.export_to_markdown()
                 if markdown_content.strip():
                     text_content.append({
                         "page": 1,
                         "content": markdown_content,
-                        "type": "markdown_text"
+                        "type": "markdown_text",
+                        "metadata": self._extract_text_metadata(doc)
                     })
-            
+
             return text_content
-            
+
         except Exception as e:
-            logger.error(f"Text extraction failed: {e}")
+            logger.error(f"Enhanced text extraction failed: {e}")
             return [{
                 "page": 1,
                 "content": "Document processed but text extraction failed",
-                "type": "error_text"
+                "type": "error_text",
+                "metadata": {"error": str(e)}
             }]
-    
+
+    def _extract_structured_text(self, doc) -> List[Dict[str, Any]]:
+        """Extract structured text content using Docling's content items."""
+        text_content = []
+        
+        try:
+            # Group content items by page
+            page_content = {}
+            
+            for item in doc.content_items:
+                # Get page number
+                page_num = getattr(item, 'page_number', 1)
+                if page_num not in page_content:
+                    page_content[page_num] = {
+                        "text_blocks": [],
+                        "headings": [],
+                        "lists": [],
+                        "paragraphs": []
+                    }
+                
+                # Extract different content types
+                if hasattr(item, 'text') and item.text:
+                    content_type = getattr(item, 'content_type', 'text')
+                    
+                    content_item = {
+                        "page": page_num,
+                        "content": item.text,
+                        "type": content_type,
+                        "metadata": self._extract_content_item_metadata(item, doc)
+                    }
+                    
+                    # Categorize by content type
+                    if content_type == 'heading':
+                        page_content[page_num]["headings"].append(content_item)
+                    elif content_type == 'list_item':
+                        page_content[page_num]["lists"].append(content_item)
+                    elif content_type == 'paragraph':
+                        page_content[page_num]["paragraphs"].append(content_item)
+                    else:
+                        page_content[page_num]["text_blocks"].append(content_item)
+            
+            # Combine all content for each page
+            for page_num, content_items in page_content.items():
+                all_content = []
+                
+                # Add headings first
+                all_content.extend(content_items["headings"])
+                
+                # Add paragraphs and text blocks
+                all_content.extend(content_items["paragraphs"])
+                all_content.extend(content_items["text_blocks"])
+                
+                # Add list items
+                all_content.extend(content_items["lists"])
+                
+                # Combine into full page text
+                page_text = "\n\n".join(item["content"] for item in all_content if item["content"])
+                
+                if page_text.strip():
+                    text_content.append({
+                        "page": page_num,
+                        "content": page_text,
+                        "type": "structured_text",
+                        "content_breakdown": {
+                            "headings": len(content_items["headings"]),
+                            "paragraphs": len(content_items["paragraphs"]),
+                            "text_blocks": len(content_items["text_blocks"]),
+                            "list_items": len(content_items["lists"])
+                        },
+                        "metadata": self._extract_text_metadata(doc)
+                    })
+        
+        except Exception as e:
+            logger.debug(f"Structured text extraction failed: {e}")
+            # Fallback to simple text extraction
+            if hasattr(doc, 'text') and doc.text:
+                text_content.append({
+                    "page": 1,
+                    "content": doc.text,
+                    "type": "document_text",
+                    "metadata": self._extract_text_metadata(doc)
+                })
+        
+        return text_content
+
+    def _extract_content_item_metadata(self, item, doc) -> Dict[str, Any]:
+        """Extract metadata for individual content items."""
+        metadata = {
+            "content_type": getattr(item, 'content_type', 'text'),
+            "page_number": getattr(item, 'page_number', 1),
+            "level": getattr(item, 'level', 0),
+            "reading_order": getattr(item, 'reading_order', 0)
+        }
+        
+        # Extract positional information
+        if hasattr(item, 'bbox'):
+            bbox = item.bbox
+            if hasattr(bbox, 'to_dict'):
+                metadata["bounding_box"] = bbox.to_dict()
+            else:
+                metadata["bounding_box"] = str(bbox)
+        
+        # Extract text properties
+        if hasattr(item, 'text_properties'):
+            text_props = item.text_properties
+            metadata["text_properties"] = {
+                "font_size": getattr(text_props, 'font_size', None),
+                "font_family": getattr(text_props, 'font_family', None),
+                "is_bold": getattr(text_props, 'is_bold', False),
+                "is_italic": getattr(text_props, 'is_italic', False)
+            }
+        
+        return metadata
+
+    def _extract_text_metadata(self, doc) -> Dict[str, Any]:
+        """Extract comprehensive text metadata using Docling's native capabilities."""
+        metadata = {
+            "word_count": 0,
+            "character_count": 0,
+            "sentence_count": 0,
+            "paragraph_count": 0,
+            "language_detected": "unknown",
+            "has_formulas": False,
+            "has_citations": False,
+            "has_references": False,
+            "complexity_score": 0.0
+        }
+        
+        try:
+            # Extract text statistics
+            if hasattr(doc, 'text') and doc.text:
+                text = doc.text
+                
+                # Basic counts
+                metadata["character_count"] = len(text)
+                metadata["word_count"] = len(text.split())
+                
+                # Sentence detection
+                import re
+                sentences = re.split(r'[.!?]+', text)
+                metadata["sentence_count"] = len([s for s in sentences if s.strip()])
+                
+                # Paragraph detection
+                paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+                metadata["paragraph_count"] = len(paragraphs)
+                
+                # Language detection (basic)
+                if self._detect_language(text):
+                    metadata["language_detected"] = self._detect_language(text)
+                
+                # Content analysis
+                metadata["has_formulas"] = bool(re.search(r'[\$\\[\\]|\w+_\{.*\}|\^.*\{', text))
+                metadata["has_citations"] = bool(re.search(r'\[\d+\]|\(\d{4}\)|\b(?:et al\.|ibid\.|op\. cit\.)\b', text))
+                metadata["has_references"] = bool(re.search(r'(?i)references?|bibliography|works cited', text))
+                
+                # Complexity score (0-1)
+                metadata["complexity_score"] = self._calculate_text_complexity(text)
+        
+        except Exception as e:
+            logger.debug(f"Text metadata extraction failed: {e}")
+        
+        return metadata
+
+    def _detect_language(self, text: str) -> str:
+        """Basic language detection using common word patterns."""
+        if not text or len(text.strip()) < 50:
+            return "unknown"
+        
+        # Simple language detection based on common words
+        english_words = ['the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were']
+        
+        words = text.lower().split()
+        english_count = sum(1 for word in words if word in english_words)
+        
+        if english_count / len(words) > 0.05:
+            return "en"
+        elif any(ord(char) > 127 for char in text[:100]):  # Non-ASCII characters
+            return "other"
+        
+        return "unknown"
+
+    def _calculate_text_complexity(self, text: str) -> float:
+        """Calculate text complexity score (0-1)."""
+        if not text:
+            return 0.0
+        
+        complexity = 0.0
+        
+        # Average word length
+        words = text.split()
+        if words:
+            avg_word_length = sum(len(word) for word in words) / len(words)
+            complexity += min(avg_word_length / 10, 0.3)
+        
+        # Average sentence length
+        sentences = [s.strip() for s in text.replace('!', '.').replace('?', '.').split('.') if s.strip()]
+        if sentences:
+            avg_sentence_length = sum(len(s.split()) for s in sentences) / len(sentences)
+            complexity += min(avg_sentence_length / 20, 0.4)
+        
+        # Technical indicators
+        technical_indicators = ['however', 'therefore', 'furthermore', 'moreover', 'consequently', 'nevertheless']
+        words_lower = text.lower().split()
+        technical_count = sum(1 for word in words_lower if word in technical_indicators)
+        complexity += min(technical_count / 10, 0.3)
+        
+        return min(complexity, 1.0)
+
     def extract_tables(self, file_path: str, doc) -> Dict[str, List[Dict[str, Any]]]:
-        """Extract and classify tables."""
+        """Extract and classify tables with enhanced metadata."""
         try:
             return self.table_parser.parse_tables(file_path=file_path, doc=doc)
         except Exception as e:
-            logger.error(f"Table extraction failed: {e}")
+            logger.error(f"Enhanced table extraction failed: {e}")
             return {
                 "capital_calls": [],
                 "distributions": [],
                 "adjustments": [],
-                "processing_method": "error"
+                "processing_method": "error",
+                "error": str(e)
             }
 
-class TextChunker:
-    """Responsible for chunking text content with semantic awareness."""
+    def extract_document_metadata(self, doc) -> Dict[str, Any]:
+        """Extract comprehensive document metadata using Docling's native capabilities."""
+        try:
+            metadata = {
+                # Basic document information
+                "title": getattr(doc, 'title', None),
+                "author": getattr(doc, 'author', None),
+                "subject": getattr(doc, 'subject', None),
+                "keywords": getattr(doc, 'keywords', None),
+                "creator": getattr(doc, 'creator', None),
+                "producer": getattr(doc, 'producer', None),
+                "creation_date": getattr(doc, 'creation_date', None),
+                "modification_date": getattr(doc, 'modification_date', None),
+                
+                # Document structure and properties
+                "page_count": len(doc.pages) if hasattr(doc, 'pages') else 0,
+                "language": getattr(doc, 'language', 'unknown'),
+                "document_type": getattr(doc, 'document_type', 'unknown'),
+                
+                # Content analysis
+                "has_text": getattr(doc, 'has_text', False),
+                "has_images": getattr(doc, 'has_images', False),
+                "has_tables": getattr(doc, 'has_tables', False),
+                "has_formulas": getattr(doc, 'has_formulas', False),
+                "has_annotations": getattr(doc, 'has_annotations', False),
+                
+                # Processing information
+                "processing_confidence": getattr(doc, 'processing_confidence', 1.0),
+                "source_file_info": getattr(doc, 'source_file_info', {}),
+                "metadata_version": getattr(doc, 'metadata_version', '1.0')
+            }
+            
+            # Extract document-level statistics
+            if hasattr(doc, 'text') and doc.text:
+                text_stats = self._analyze_document_text(doc.text)
+                metadata.update(text_stats)
+            
+            # Extract layout information
+            if hasattr(doc, 'pages') and doc.pages:
+                layout_info = self._analyze_document_layout(doc)
+                metadata.update(layout_info)
+            
+            # Extract reading order and hierarchy
+            if hasattr(doc, 'reading_order') and doc.reading_order:
+                hierarchy_info = self._analyze_document_hierarchy(doc)
+                metadata.update(hierarchy_info)
+            
+            # Add custom metadata extraction
+            custom_metadata = self._extract_custom_metadata(doc)
+            metadata.update(custom_metadata)
+            
+            logger.info(f"✓ Extracted comprehensive metadata: {len(metadata)} fields")
+            return metadata
+            
+        except Exception as e:
+            logger.error(f"Metadata extraction failed: {e}")
+            return {
+                "error": str(e),
+                "extraction_successful": False,
+                "fallback_metadata": True
+            }
 
-    def __init__(self, chunk_size: int = 500, chunk_overlap: int = 20):
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
-
-    def chunk_text(self, text_content: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Chunk text content into manageable pieces with semantic awareness."""
-        chunks = []
-
-        for item in text_content:
-            content = item["content"]
-
-            if len(content) <= self.chunk_size:
-                # Single chunk - no need to split
-                chunks.append({
-                    "content": content,
-                    "metadata": {
-                        "page": item["page"],
-                        "type": item["type"],
-                        "chunk_index": 0,
-                        "is_complete": True
-                    }
-                })
-            else:
-                # Multiple chunks with semantic splitting
-                semantic_chunks = self._split_semantic_chunks(content, self.chunk_size, self.chunk_overlap)
-
-                for i, chunk_content in enumerate(semantic_chunks):
-                    chunks.append({
-                        "content": chunk_content,
-                        "metadata": {
-                            "page": item["page"],
-                            "type": item["type"],
-                            "chunk_index": len(chunks),
-                            "is_complete": self._is_complete_chunk(chunk_content)
-                        }
-                    })
-
-        return chunks
-
-    def _split_semantic_chunks(self, text: str, chunk_size: int, overlap: int) -> List[str]:
-        """Split text into semantic chunks, preferring to break at natural boundaries."""
-        if len(text) <= chunk_size:
-            return [text]
-
-        # First, identify table sections and treat them as atomic units
-        table_sections = self._identify_table_sections(text)
-
-        if not table_sections:
-            # No tables detected, use regular semantic chunking
-            return self._chunk_regular_text(text, chunk_size, overlap)
-
-        # Handle text with tables
-        return self._chunk_text_with_tables(text, table_sections, chunk_size, overlap)
-
-    def _identify_table_sections(self, text: str) -> List[tuple[int, int]]:
-        """Identify table sections in the text and return their start/end positions."""
-        sections = []
-        lines = text.split('\n')
-
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
-
-            # Look for table patterns (multiple pipes, or structured data)
-            if self._is_table_line(line):
-                table_start = text.find(line, text.find('\n', text.find(lines[i-1]) if i > 0 else 0) + 1 if i > 0 else 0)
-
-                # Find the end of the table
-                table_end = table_start + len(line)
-                j = i + 1
-
-                while j < len(lines):
-                    next_line = lines[j].strip()
-                    if self._is_table_line(next_line) or (next_line and not next_line[0].isupper() and '|' in next_line):
-                        table_end = text.find(next_line, table_end) + len(next_line)
-                        j += 1
-                    else:
-                        break
-
-                if table_end > table_start:
-                    sections.append((table_start, table_end))
-                    i = j
-                else:
-                    i += 1
-            else:
-                i += 1
-
-        return sections
-
-    def _is_table_line(self, line: str) -> bool:
-        """Check if a line appears to be part of a table."""
-        if not line:
-            return False
-
-        # Count pipes
-        pipe_count = line.count('|')
-
-        # Check for structured data patterns
-        if pipe_count >= 2:
-            return True
-
-        # Check for tab-separated values
-        if '\t' in line and len(line.split('\t')) >= 3:
-            return True
-
-        # Check for aligned columns (multiple spaces separating data)
-        parts = line.split()
-        if len(parts) >= 4 and any(len(part) > 10 for part in parts):
-            return True
-
-        return False
-
-    def _chunk_text_with_tables(self, text: str, table_sections: List[tuple[int, int]], chunk_size: int, overlap: int) -> List[str]:
-        """Chunk text that contains tables, treating tables as atomic units."""
-        chunks = []
-        start = 0
-
-        for table_start, table_end in table_sections:
-            # Handle text before the table
-            if start < table_start:
-                pre_table_text = text[start:table_start].strip()
-                if pre_table_text:
-                    # Chunk the pre-table text
-                    pre_chunks = self._chunk_regular_text(pre_table_text, chunk_size, overlap)
-                    chunks.extend(pre_chunks)
-
-            # Add the entire table as one chunk (if it fits)
-            table_text = text[table_start:table_end].strip()
-            if len(table_text) <= chunk_size:
-                chunks.append(table_text)
-            else:
-                # If table is too large, split it at row boundaries
-                table_chunks = self._chunk_table(table_text, chunk_size, overlap)
-                chunks.extend(table_chunks)
-
-            start = table_end
-
-        # Handle remaining text after the last table
-        if start < len(text):
-            remaining_text = text[start:].strip()
-            if remaining_text:
-                remaining_chunks = self._chunk_regular_text(remaining_text, chunk_size, overlap)
-                chunks.extend(remaining_chunks)
-
-        return chunks
-
-    def _chunk_table(self, table_text: str, chunk_size: int, overlap: int) -> List[str]:
-        """Split a large table into chunks at row boundaries."""
-        lines = table_text.split('\n')
-        chunks = []
-
-        current_chunk = []
-        current_size = 0
-
-        for line in lines:
-            line_size = len(line) + 1  # +1 for newline
-
-            if current_size + line_size > chunk_size and current_chunk:
-                # Save current chunk
-                chunk_text = '\n'.join(current_chunk)
-                if chunk_text.strip():
-                    chunks.append(chunk_text)
-
-                # Start new chunk with overlap (keep last few lines)
-                overlap_lines = min(len(current_chunk), 2)  # Keep up to 2 lines for overlap
-                current_chunk = current_chunk[-overlap_lines:] if overlap_lines > 0 else []
-                current_size = sum(len(line) + 1 for line in current_chunk)
-
-            current_chunk.append(line)
-            current_size += line_size
-
-        # Add the last chunk
-        if current_chunk:
-            chunk_text = '\n'.join(current_chunk)
-            if chunk_text.strip():
-                chunks.append(chunk_text)
-
-        return chunks
-
-    def _chunk_regular_text(self, text: str, chunk_size: int, overlap: int) -> List[str]:
-        """Chunk regular (non-table) text using semantic boundaries."""
-        if len(text) <= chunk_size:
-            return [text]
-
-        chunks = []
-        start = 0
-
-        while start < len(text):
-            end = start + chunk_size
-
-            if end >= len(text):
-                chunk_text = text[start:].strip()
-                if chunk_text:
-                    chunks.append(chunk_text)
-                break
-
-            # Try to find a good breaking point within the last 30% of the chunk
-            break_search_start = max(start + int(chunk_size * 0.7), start)
-            break_pos = self._find_semantic_break(text, break_search_start, end)
-
-            if break_pos > start:
-                chunk_text = text[start:break_pos].strip()
-                if chunk_text:
-                    chunks.append(chunk_text)
-                start = break_pos
-            else:
-                # No good break point found, force break at a reasonable position
-                fallback_end = self._find_fallback_break(text, start, end)
-                chunk_text = text[start:fallback_end].strip()
-                if chunk_text:
-                    chunks.append(chunk_text)
-                start = max(fallback_end - overlap, start + 50)
-
-    def _find_fallback_break(self, text: str, start: int, end: int) -> int:
-        """Find a fallback breaking point when no semantic break is found."""
-        # Look for whitespace characters in reverse order
-        for i in range(end - 1, start - 1, -1):
-            if text[i].isspace():
-                return i + 1  # Include the whitespace
-
-        # If no whitespace found, break at a word boundary if possible
-        for i in range(end - 1, max(start, end - 20), -1):
-            if not text[i].isalnum() and text[i] not in ['_', '-']:
-                return i
-
-        # Last resort: break exactly at chunk_size
-        return end
-
-    def _find_semantic_break(self, text: str, search_start: int, search_end: int) -> int:
-        """Find the best semantic breaking point in the text."""
-        # Define semantic break patterns in order of preference
-        break_patterns = [
-            r'\n\s*\n',  # Double newlines (paragraph breaks)
-            r'(?<=\.)\s+(?=[A-Z])',  # Period followed by capital letter (sentence end)
-            r'(?<=\!|\?)\s+',  # Exclamation/question marks
-            r'\n',  # Single newlines
-            r'(?<=\;|\:)\s+',  # Semicolon/colon
-            r'\s+',  # Whitespace (last resort)
-        ]
-
-        # Search backwards from search_end to find the best break
-        for pattern in break_patterns:
-            import re
-            matches = list(re.finditer(pattern, text[search_start:search_end]))
-            if matches:
-                # Take the last (rightmost) match
-                match = matches[-1]
-                return search_start + match.end()
-
-        return -1  # No suitable break found
-
-    def _is_complete_chunk(self, chunk_text: str) -> bool:
-        """Determine if a chunk appears to be complete (not cut off mid-sentence/table)."""
-        if not chunk_text or len(chunk_text.strip()) == 0:
-            return False
-
-        text = chunk_text.strip()
-
-        # Check for incomplete sentences (ends with incomplete words or punctuation)
-        if text.endswith(('...', '…', 'etc.', 'i.e.', 'e.g.', 'vs.', 'cf.', 'Dr.', 'Mr.', 'Mrs.', 'Ms.')):
-            return False
-
-        # Check for table-like content that might be cut off
-        lines = text.split('\n')
-        if len(lines) > 1:
-            # Check if it looks like a table (multiple | separators)
-            pipe_count = text.count('|')
-            if pipe_count >= 4:  # Likely a table
-                # For tables, check if we have complete rows
-                table_lines = [line for line in lines if line.strip() and '|' in line]
-                if len(table_lines) > 1:  # Has header + at least one data row
-                    # Check if the table looks complete (has balanced structure)
-                    first_row_pipes = table_lines[0].count('|')
-                    last_row_pipes = table_lines[-1].count('|')
-                    if abs(first_row_pipes - last_row_pipes) > 1:  # Significant imbalance
-                        return False
-                else:
-                    # Single table line, might be incomplete
-                    return False
-
-        # Check for incomplete parentheses/brackets
-        if text.count('(') > text.count(')') or text.count('[') > text.count(']'):
-            return False
-
-        # Check for trailing punctuation that suggests incompleteness
-        if text.endswith(('.', '!', '?', ':', ';', ',')):
-            return True
-        elif text.endswith(('-', '–', '—')):
-            return False
-
-        # Additional check: if text ends with a word that's cut off
+    def _analyze_document_text(self, text: str) -> Dict[str, Any]:
+        """Analyze document text for comprehensive statistics."""
+        if not text:
+            return {}
+        
+        import re
+        
+        # Text statistics
         words = text.split()
-        if words and len(words[-1]) < 3 and not any(words[-1].endswith(punct) for punct in '.!?,;:'):
-            return False
+        sentences = re.split(r'[.!?]+', text)
+        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+        
+        # Content complexity
+        unique_words = set(word.lower().strip('.,!?;:"') for word in words)
+        vocabulary_richness = len(unique_words) / len(words) if words else 0
+        
+        # Technical content indicators
+        technical_indicators = {
+            "formulas": len(re.findall(r'[\$\\[\\]|\w+_\{.*\}|\^.*\{', text)),
+            "tables_references": len(re.findall(r'(?i)table\s+\d+|figure\s+\d+|chart\s+\d+', text)),
+            "citations": len(re.findall(r'\[\d+\]|\(\d{4}\)|et al\.', text)),
+            "acronyms": len(re.findall(r'\b[A-Z]{2,}\b', text)),
+            "numbers": len(re.findall(r'\b\d+\b', text))
+        }
+        
+        return {
+            "text_statistics": {
+                "word_count": len(words),
+                "unique_word_count": len(unique_words),
+                "sentence_count": len([s for s in sentences if s.strip()]),
+                "paragraph_count": len(paragraphs),
+                "character_count": len(text),
+                "vocabulary_richness": round(vocabulary_richness, 3),
+                "average_words_per_sentence": round(len(words) / max(len(sentences), 1), 2)
+            },
+            "content_analysis": technical_indicators
+        }
 
-        return True
+    def _analyze_document_layout(self, doc) -> Dict[str, Any]:
+        """Analyze document layout structure."""
+        if not hasattr(doc, 'pages') or not doc.pages:
+            return {}
+        
+        layout_stats = {
+            "layout_analysis": {
+                "pages_with_text": 0,
+                "pages_with_images": 0,
+                "pages_with_tables": 0,
+                "pages_with_headers": 0,
+                "pages_with_footers": 0,
+                "multi_column_pages": 0
+            }
+        }
+        
+        for page in doc.pages:
+            # Check page content types
+            if hasattr(page, 'text_items') and page.text_items:
+                layout_stats["layout_analysis"]["pages_with_text"] += 1
+            
+            if hasattr(page, 'image_items') and page.image_items:
+                layout_stats["layout_analysis"]["pages_with_images"] += 1
+            
+            if hasattr(page, 'table_items') and page.table_items:
+                layout_stats["layout_analysis"]["pages_with_tables"] += 1
+            
+            # Check for headers/footers
+            if hasattr(page, 'header_items') and page.header_items:
+                layout_stats["layout_analysis"]["pages_with_headers"] += 1
+            
+            if hasattr(page, 'footer_items') and page.footer_items:
+                layout_stats["layout_analysis"]["pages_with_footers"] += 1
+            
+            # Check for multi-column layout
+            if hasattr(page, 'column_layout') and page.column_layout:
+                layout_stats["layout_analysis"]["multi_column_pages"] += 1
+        
+        return layout_stats
 
-    def post_process_chunks(self, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Post-process chunks to improve readability and completeness."""
-        processed_chunks = []
+    def _analyze_document_hierarchy(self, doc) -> Dict[str, Any]:
+        """Analyze document reading order and hierarchy."""
+        hierarchy_info = {
+            "hierarchy_analysis": {
+                "has_reading_order": False,
+                "section_count": 0,
+                "subsection_count": 0,
+                "heading_levels": [],
+                "document_outline": []
+            }
+        }
+        
+        try:
+            if hasattr(doc, 'reading_order') and doc.reading_order:
+                hierarchy_info["hierarchy_analysis"]["has_reading_order"] = True
+                
+                # Extract structural elements
+                sections = []
+                headings = []
+                
+                if hasattr(doc, 'content_items'):
+                    for item in doc.content_items:
+                        if hasattr(item, 'content_type'):
+                            if item.content_type == 'heading':
+                                level = getattr(item, 'level', 1)
+                                headings.append({
+                                    "level": level,
+                                    "text": getattr(item, 'text', ''),
+                                    "page": getattr(item, 'page_number', 1)
+                                })
+                            elif item.content_type == 'section':
+                                sections.append({
+                                    "text": getattr(item, 'text', ''),
+                                    "page": getattr(item, 'page_number', 1)
+                                })
+                
+                hierarchy_info["hierarchy_analysis"]["section_count"] = len(sections)
+                hierarchy_info["hierarchy_analysis"]["subsection_count"] = len([h for h in headings if h["level"] > 1])
+                hierarchy_info["hierarchy_analysis"]["heading_levels"] = list(set(h["level"] for h in headings))
+                hierarchy_info["hierarchy_analysis"]["document_outline"] = headings
+        
+        except Exception as e:
+            logger.debug(f"Hierarchy analysis failed: {e}")
+        
+        return hierarchy_info
 
-        for chunk in chunks:
-            content = chunk["content"]
-            metadata = chunk["metadata"]
+    def _extract_custom_metadata(self, doc) -> Dict[str, Any]:
+        """Extract custom metadata based on document type."""
+        custom_metadata = {
+            "document_classification": {
+                "type": "unknown",
+                "confidence": 0.0,
+                "indicators": []
+            }
+        }
+        
+        try:
+            # Analyze document characteristics for classification
+            indicators = []
+            
+            # Check for financial documents
+            if hasattr(doc, 'text') and doc.text:
+                text_lower = doc.text.lower()
+                financial_keywords = ['fund', 'investment', 'capital', 'dividend', 'return', 'performance', 'portfolio']
+                financial_score = sum(1 for keyword in financial_keywords if keyword in text_lower)
+                
+                if financial_score > 5:
+                    indicators.append("financial_document")
+                    custom_metadata["document_classification"]["type"] = "financial"
+                    custom_metadata["document_classification"]["confidence"] = min(financial_score / 10, 1.0)
+            
+            # Check for table-heavy documents
+            if hasattr(doc, 'has_tables') and doc.has_tables:
+                indicators.append("table_heavy")
+                if custom_metadata["document_classification"]["type"] == "unknown":
+                    custom_metadata["document_classification"]["type"] = "tabular"
+            
+            # Check for image-heavy documents
+            if hasattr(doc, 'has_images') and doc.has_images:
+                indicators.append("image_heavy")
+            
+            # Check for form-like documents
+            if hasattr(doc, 'form_fields') and doc.form_fields:
+                indicators.append("form_document")
+            
+            custom_metadata["document_classification"]["indicators"] = indicators
+            
+        except Exception as e:
+            logger.debug(f"Custom metadata extraction failed: {e}")
+        
+        return custom_metadata
 
-            # Clean up table formatting
-            if '|' in content and '\n' in content:
-                content = self._clean_table_formatting(content)
+    def extract_content_types(self, doc) -> Dict[str, List[Dict[str, Any]]]:
+        """Extract and classify different content types using Docling's analysis."""
+        content_types = {
+            "text_blocks": [],
+            "tables": [],
+            "images": [],
+            "formulas": [],
+            "captions": [],
+            "headings": [],
+            "lists": []
+        }
+        
+        try:
+            if hasattr(doc, 'content_items'):
+                for item in doc.content_items:
+                    content_item = {
+                        "content": getattr(item, 'text', ''),
+                        "page": getattr(item, 'page_number', 1),
+                        "bbox": getattr(item, 'bbox', None),
+                        "metadata": self._extract_content_item_metadata(item, doc)
+                    }
+                    
+                    content_type = getattr(item, 'content_type', 'text')
+                    
+                    if content_type == 'heading':
+                        content_types["headings"].append(content_item)
+                    elif content_type == 'table':
+                        content_types["tables"].append(content_item)
+                    elif content_type == 'image':
+                        content_types["images"].append(content_item)
+                    elif content_type == 'formula':
+                        content_types["formulas"].append(content_item)
+                    elif content_type == 'caption':
+                        content_types["captions"].append(content_item)
+                    elif content_type == 'list_item':
+                        content_types["lists"].append(content_item)
+                    else:
+                        content_types["text_blocks"].append(content_item)
+            
+            logger.info(f"✓ Extracted content types: {sum(len(v) for v in content_types.values())} items")
+            
+        except Exception as e:
+            logger.error(f"Content type extraction failed: {e}")
+        
+        return content_types
 
-            # Add continuation markers for incomplete chunks
-            if not metadata.get("is_complete", True):
-                content = self._add_continuation_marker(content)
+    def extract_formulas_and_references(self, doc) -> Dict[str, List[Dict[str, Any]]]:
+        """Extract formulas, citations, and references using Docling's native capabilities."""
+        formulas_references = {
+            "mathematical_formulas": [],
+            "chemical_formulas": [],
+            "code_snippets": [],
+            "citations": [],
+            "bibliographic_references": [],
+            "figure_references": [],
+            "table_references": [],
+            "equation_numbers": []
+        }
+        
+        try:
+            # Extract formulas using Docling's native formula detection
+            if hasattr(doc, 'formulas') and doc.formulas:
+                for formula in doc.formulas:
+                    formula_item = {
+                        "content": getattr(formula, 'text', ''),
+                        "latex": getattr(formula, 'latex', None),
+                        "page": getattr(formula, 'page_number', 1),
+                        "equation_number": getattr(formula, 'equation_number', None),
+                        "bbox": getattr(formula, 'bbox', None),
+                        "formula_type": getattr(formula, 'formula_type', 'unknown'),
+                        "metadata": self._extract_item_metadata(formula)
+                    }
+                    formulas_references["mathematical_formulas"].append(formula_item)
+            
+            # Extract from content items for formulas and references
+            if hasattr(doc, 'content_items'):
+                for item in doc.content_items:
+                    content = getattr(item, 'text', '')
+                    if not content:
+                        continue
+                    
+                    # Extract mathematical formulas
+                    formulas = self._extract_mathematical_formulas(content, item)
+                    for formula in formulas:
+                        formulas_references["mathematical_formulas"].append(formula)
+                    
+                    # Extract chemical formulas
+                    chemical_formulas = self._extract_chemical_formulas(content, item)
+                    formulas_references["chemical_formulas"].extend(chemical_formulas)
+                    
+                    # Extract code snippets
+                    code_snippets = self._extract_code_snippets(content, item)
+                    formulas_references["code_snippets"].extend(code_snippets)
+                    
+                    # Extract citations and references
+                    citations = self._extract_citations(content, item)
+                    formulas_references["citations"].extend(citations)
+                    
+                    # Extract references
+                    references = self._extract_references(content, item)
+                    formulas_references["bibliographic_references"].extend(references)
+                    
+                    # Extract figure and table references
+                    figure_refs = self._extract_figure_references(content, item)
+                    table_refs = self._extract_table_references(content, item)
+                    formulas_references["figure_references"].extend(figure_refs)
+                    formulas_references["table_references"].extend(table_refs)
+            
+            logger.info(f"✓ Extracted formulas and references: {sum(len(v) for v in formulas_references.values())} items")
+            
+        except Exception as e:
+            logger.error(f"Formula and reference extraction failed: {e}")
+        
+        return formulas_references
 
-            # Update the chunk
-            processed_chunk = chunk.copy()
-            processed_chunk["content"] = content
-            processed_chunks.append(processed_chunk)
+    def _extract_mathematical_formulas(self, content: str, item) -> List[Dict[str, Any]]:
+        """Extract mathematical formulas from content."""
+        import re
+        
+        formulas = []
+        
+        # LaTeX-style formulas
+        latex_patterns = [
+            r'\$(.+?)\$',  # Inline math
+            r'\$\$(.+?)\$\$',  # Display math
+            r'\\begin\{equation\}(.+?)\\end\{equation\}',
+            r'\\begin\{align\}(.+?)\\end\{align\}'
+        ]
+        
+        for pattern in latex_patterns:
+            matches = re.finditer(pattern, content, re.DOTALL)
+            for match in matches:
+                formulas.append({
+                    "content": match.group(1) if match.groups() else match.group(0),
+                    "type": "latex",
+                    "page": getattr(item, 'page_number', 1),
+                    "equation_number": self._extract_equation_number(content, match.start()),
+                    "bbox": getattr(item, 'bbox', None),
+                    "metadata": self._extract_item_metadata(item)
+                })
+        
+        # Unicode mathematical symbols
+        math_symbols = ['∑', '∫', '√', '∞', 'π', 'α', 'β', 'γ', 'σ', 'μ']
+        if any(symbol in content for symbol in math_symbols):
+            formulas.append({
+                "content": content,
+                "type": "unicode_math",
+                "page": getattr(item, 'page_number', 1),
+                "equation_number": self._extract_equation_number(content, 0),
+                "bbox": getattr(item, 'bbox', None),
+                "metadata": self._extract_item_metadata(item)
+            })
+        
+        return formulas
 
-        return processed_chunks
+    def _extract_chemical_formulas(self, content: str, item) -> List[Dict[str, Any]]:
+        """Extract chemical formulas from content."""
+        import re
+        
+        # Chemical formula patterns (e.g., H2O, CH3COOH, Fe2O3)
+        chemical_pattern = r'\b[A-Z][a-z]?(?:\d*[a-z]?)*(?:\d+)?\b'
+        
+        matches = re.finditer(chemical_pattern, content)
+        formulas = []
+        
+        for match in matches:
+            formula = match.group(0)
+            # Filter out common words that might match
+            if len(formula) > 1 and not self._is_common_word(formula):
+                formulas.append({
+                    "content": formula,
+                    "type": "chemical",
+                    "page": getattr(item, 'page_number', 1),
+                    "bbox": getattr(item, 'bbox', None),
+                    "metadata": self._extract_item_metadata(item)
+                })
+        
+        return formulas
 
-    def _clean_table_formatting(self, content: str) -> str:
-        """Clean up table formatting for better readability."""
-        lines = content.split('\n')
-        cleaned_lines = []
+    def _extract_code_snippets(self, content: str, item) -> List[Dict[str, Any]]:
+        """Extract code snippets from content."""
+        import re
+        
+        code_blocks = []
+        
+        # Markdown code blocks
+        code_pattern = r'```[\w]*\n(.*?)\n```'
+        matches = re.finditer(code_pattern, content, re.DOTALL)
+        
+        for match in matches:
+            code_content = match.group(1)
+            language = self._detect_code_language(code_content)
+            
+            code_blocks.append({
+                "content": code_content,
+                "language": language,
+                "type": "code_block",
+                "page": getattr(item, 'page_number', 1),
+                "bbox": getattr(item, 'bbox', None),
+                "metadata": self._extract_item_metadata(item)
+            })
+        
+        # Inline code
+        inline_code_pattern = r'`([^`]+)`'
+        matches = re.finditer(inline_code_pattern, content)
+        
+        for match in matches:
+            code_content = match.group(1)
+            if len(code_content.strip()) > 2:  # Avoid very short matches
+                code_blocks.append({
+                    "content": code_content,
+                    "type": "inline_code",
+                    "page": getattr(item, 'page_number', 1),
+                    "bbox": getattr(item, 'bbox', None),
+                    "metadata": self._extract_item_metadata(item)
+                })
+        
+        return code_blocks
 
-        for line in lines:
-            line = line.strip()
-            if line:
-                # Ensure consistent spacing around pipes
-                line = re.sub(r'\s*\|\s*', ' | ', line)
-                line = re.sub(r'^\s*\|\s*', '', line)  # Remove leading pipe
-                line = re.sub(r'\s*\|\s*$', '', line)  # Remove trailing pipe
-                # Clean up multiple spaces
-                line = re.sub(r'\s+', ' ', line)
-                cleaned_lines.append(line)
+    def _extract_citations(self, content: str, item) -> List[Dict[str, Any]]:
+        """Extract citations from content."""
+        import re
+        
+        citations = []
+        
+        # IEEE style: [1], [2, 3], [1-3]
+        ieee_pattern = r'\[(\d+(?:[-–]\d+)?(?:,\s*\d+)*)\]'
+        matches = re.finditer(ieee_pattern, content)
+        
+        for match in matches:
+            citations.append({
+                "content": match.group(0),
+                "numbers": match.group(1),
+                "style": "ieee",
+                "page": getattr(item, 'page_number', 1),
+                "position": match.start(),
+                "bbox": getattr(item, 'bbox', None),
+                "metadata": self._extract_item_metadata(item)
+            })
+        
+        # APA style: (Author, Year)
+        apa_pattern = r'\(([A-Z][a-zA-Z]+,?\s+\d{4}[a-z]?)\)'
+        matches = re.finditer(apa_pattern, content)
+        
+        for match in matches:
+            citations.append({
+                "content": match.group(0),
+                "author_year": match.group(1),
+                "style": "apa",
+                "page": getattr(item, 'page_number', 1),
+                "position": match.start(),
+                "bbox": getattr(item, 'bbox', None),
+                "metadata": self._extract_item_metadata(item)
+            })
+        
+        # et al. references
+        etal_pattern = r'\([^)]*et al\.\s*\d{4}[^)]*\)'
+        matches = re.finditer(etal_pattern, content, re.IGNORECASE)
+        
+        for match in matches:
+            citations.append({
+                "content": match.group(0),
+                "style": "etal",
+                "page": getattr(item, 'page_number', 1),
+                "position": match.start(),
+                "bbox": getattr(item, 'bbox', None),
+                "metadata": self._extract_item_metadata(item)
+            })
+        
+        return citations
 
-        return '\n'.join(cleaned_lines)
+    def _extract_references(self, content: str, item) -> List[Dict[str, Any]]:
+        """Extract bibliographic references from content."""
+        import re
+        
+        references = []
+        
+        # Common reference section headers
+        reference_headers = [
+            r'references?\b',
+            r'works\s+cited\b',
+            r'bibliography\b',
+            r'literature\s+cited\b'
+        ]
+        
+        for header_pattern in reference_headers:
+            header_match = re.search(header_pattern, content, re.IGNORECASE)
+            if header_match:
+                # Extract text after reference header
+                ref_section = content[header_match.end():]
+                
+                # Split into individual references (usually separated by blank lines)
+                ref_blocks = re.split(r'\n\s*\n', ref_section.strip())
+                
+                for ref_text in ref_blocks:
+                    if len(ref_text.strip()) > 50:  # Likely a reference
+                        references.append({
+                            "content": ref_text.strip(),
+                            "type": "bibliographic",
+                            "page": getattr(item, 'page_number', 1),
+                            "bbox": getattr(item, 'bbox', None),
+                            "metadata": self._extract_item_metadata(item)
+                        })
+        
+        return references
 
-    def _add_continuation_marker(self, content: str) -> str:
-        """Add a continuation marker to incomplete chunks."""
-        if content.endswith(('...', '…')):
-            return content  # Already has continuation marker
-        elif content.endswith(('.', '!', '?', ':', ';')):
-            return content + " [continued...]"
-        else:
-            return content + "... [continued]"
+    def _extract_figure_references(self, content: str, item) -> List[Dict[str, Any]]:
+        """Extract figure references from content."""
+        import re
+        
+        figure_refs = []
+        
+        # Figure references: "Figure 1.1", "Fig. 2", "Figure 3A"
+        figure_pattern = r'(?:Figure|Fig\.)\s+(\d+[A-Z]?)'
+        matches = re.finditer(figure_pattern, content, re.IGNORECASE)
+        
+        for match in matches:
+            figure_refs.append({
+                "content": match.group(0),
+                "figure_number": match.group(1),
+                "type": "figure_reference",
+                "page": getattr(item, 'page_number', 1),
+                "position": match.start(),
+                "bbox": getattr(item, 'bbox', None),
+                "metadata": self._extract_item_metadata(item)
+            })
+        
+        return figure_refs
+
+    def _extract_table_references(self, content: str, item) -> List[Dict[str, Any]]:
+        """Extract table references from content."""
+        import re
+        
+        table_refs = []
+        
+        # Table references: "Table 2.1", "Table 3"
+        table_pattern = r'Table\s+(\d+(?:\.\d+)?)'
+        matches = re.finditer(table_pattern, content, re.IGNORECASE)
+        
+        for match in matches:
+            table_refs.append({
+                "content": match.group(0),
+                "table_number": match.group(1),
+                "type": "table_reference",
+                "page": getattr(item, 'page_number', 1),
+                "position": match.start(),
+                "bbox": getattr(item, 'bbox', None),
+                "metadata": self._extract_item_metadata(item)
+            })
+        
+        return table_refs
+
+    def _extract_equation_number(self, content: str, position: int) -> str:
+        """Extract equation number from nearby content."""
+        # Look for equation numbers like (1), (2.1), etc.
+        import re
+        
+        # Search backward and forward from position
+        search_start = max(0, position - 100)
+        search_end = min(len(content), position + 100)
+        search_text = content[search_start:search_end]
+        
+        equation_pattern = r'\((\d+(?:\.\d+)?)\)'
+        match = re.search(equation_pattern, search_text)
+        
+        if match:
+            return match.group(1)
+        
+        return None
+
+    def _detect_code_language(self, code_content: str) -> str:
+        """Detect programming language from code content."""
+        # Simple language detection based on keywords and syntax
+        language_patterns = {
+            'python': [r'\bdef\b', r'\bimport\b', r'\bclass\b', r':\s*$'],
+            'javascript': [r'\bfunction\b', r'\bvar\b', r'\blet\b', r'=>'],
+            'java': [r'\bpublic\b', r'\bclass\b', r'\bimport\b', r';'],
+            'c++': [r'#include', r'\bint\b', r'\bclass\b', r'::'],
+            'html': [r'<[^>]+>', r'<!DOCTYPE'],
+            'sql': [r'\bSELECT\b', r'\bFROM\b', r'\bWHERE\b', r';'],
+        }
+        
+        code_lower = code_content.lower()
+        
+        for lang, patterns in language_patterns.items():
+            score = sum(1 for pattern in patterns if re.search(pattern, code_lower, re.MULTILINE))
+            if score >= 2:  # At least 2 matches
+                return lang
+        
+        return 'unknown'
+
+    def _is_common_word(self, word: str) -> bool:
+        """Check if word is a common English word (to avoid false positives in chemical formulas)."""
+        common_words = {
+            'can', 'old', 'car', 'man', 'new', 'get', 'see', 'use', 'way', 'say', 'her', 'his',
+            'one', 'two', 'had', 'but', 'not', 'was', 'all', 'any', 'may', 'she', 'use', 'her'
+        }
+        return word.lower() in common_words
+
+    def _extract_item_metadata(self, item) -> Dict[str, Any]:
+        """Extract standard metadata for any item."""
+        return {
+            "content_type": getattr(item, 'content_type', 'unknown'),
+            "page_number": getattr(item, 'page_number', 1),
+            "confidence": getattr(item, 'confidence', 1.0),
+            "level": getattr(item, 'level', 0),
+            "reading_order": getattr(item, 'reading_order', 0)
+        }
+
     
 class DataStorer:
     """Responsible for storing data in databases."""
-    
-    def __init__(self, vector_store: VectorStore, data_parser: DataParserProtocol):
+
+    def __init__(self, vector_store: VectorStore, data_parser: DataParser):
         self.vector_store = vector_store
         self.data_parser = data_parser
     
     async def store_chunks(self, chunks: List[Dict[str, Any]], document_id: int, fund_id: int) -> bool:
-        """Store text chunks in vector database."""
+        """Store text chunks synchronously."""
         if not chunks:
             return True
-        
+
         try:
             # Add metadata
             for chunk in chunks:
@@ -542,91 +1052,76 @@ class DataStorer:
                     "document_id": document_id,
                     "fund_id": fund_id
                 })
-            
+
             logger.info(f"Storing {len(chunks)} text chunks")
-            return await self.vector_store.store_chunks(chunks)
-            
+            # Use synchronous storage method
+            success = self._store_chunks_synchronously(chunks)
+            logger.info(f"Successfully stored {len(chunks)} chunks" if success else "Failed to store chunks")
+            return success
+
         except Exception as e:
             logger.error(f"Chunk storage failed: {e}")
             return False
+
+    def _store_chunks_synchronously(self, chunks: List[Dict[str, Any]]) -> bool:
+        """Store chunks synchronously using VectorStore's sync method."""
+        try:
+            # Use the VectorStore's synchronous store_chunks_sync method
+            return self.vector_store.store_chunks_sync(chunks)
+        except Exception as e:
+            logger.error(f"Failed to store chunks synchronously: {e}")
+            return False
     
     async def store_tables(self, tables_data: Dict[str, List[Dict[str, Any]]], fund_id: int) -> int:
-        """Store table data with duplicate prevention."""
+        """Store table data synchronously."""
+        from app.db.session import SessionLocal
+
         stored_count = 0
-
-        async with self._get_db_session() as db:
-            try:
-                # Clear existing data for this fund
-                await self._clear_existing_data(db, fund_id)
-
-                # Collect objects for bulk insert
-                objects_to_insert = []
-
-                for table_type, tables in tables_data.items():
-                    if table_type == "processing_method":
-                        continue
-
-                    for table in tables:
-                        rows = table.get("rows", [])
-                        for row in rows:
-                            obj = self._create_transaction_object(table_type, row, fund_id)
-                            if obj and await self._is_duplicate(db, obj):
-                                objects_to_insert.append(obj)
-
-                # Bulk insert
-                if objects_to_insert:
-                    db.add_all(objects_to_insert)
-                    await db.commit()
-                    stored_count = len(objects_to_insert)
-                    logger.info(f"Stored {stored_count} transactions")
-
-            except Exception as e:
-                await db.rollback()
-                logger.error(f"Table storage failed: {e}")
-                raise
-
-        return stored_count
-
-    def store_tables_sync(self, tables_data: Dict[str, List[Dict[str, Any]]], fund_id: int) -> int:
-        """Synchronous version of store_tables for Celery context."""
-        import asyncio
-
-        try:
-            # Create new event loop for synchronous context
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                return loop.run_until_complete(self.store_tables(tables_data, fund_id))
-            finally:
-                loop.close()
-        except Exception as e:
-            logger.error(f"Failed to store tables synchronously: {e}")
-            return 0
-    
-    @asynccontextmanager
-    async def _get_db_session(self):
-        """Get database session with proper cleanup."""
         db = SessionLocal()
         try:
-            yield db
+            # Clear existing data for this fund
+            db.query(CapitalCall).filter(CapitalCall.fund_id == fund_id).delete()
+            db.query(Distribution).filter(Distribution.fund_id == fund_id).delete()
+            db.query(Adjustment).filter(Adjustment.fund_id == fund_id).delete()
+            db.commit()
+
+            # Collect objects for bulk insert
+            objects_to_insert = []
+
+            for table_type, tables in tables_data.items():
+                if table_type == "processing_method":
+                    continue
+
+                for table in tables:
+                    rows = table.get("rows", [])
+                    for row in rows:
+                        obj = self._create_transaction_object(table_type, row, fund_id)
+                        if obj:
+                            objects_to_insert.append(obj)
+
+            # Bulk insert
+            if objects_to_insert:
+                db.add_all(objects_to_insert)
+                db.commit()
+                stored_count = len(objects_to_insert)
+                logger.info(f"Stored {stored_count} transactions synchronously")
+
+            return stored_count
+
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Database error storing tables: {e}")
+            raise
         finally:
-            await db.close()
-    
-    async def _clear_existing_data(self, db, fund_id: int):
-        """Clear existing transaction data for fund."""
-        deleted_calls = await db.query(CapitalCall).filter(CapitalCall.fund_id == fund_id).delete()
-        deleted_distributions = await db.query(Distribution).filter(Distribution.fund_id == fund_id).delete()
-        deleted_adjustments = await db.query(Adjustment).filter(Adjustment.fund_id == fund_id).delete()
-        
-        logger.info(f"Cleared {deleted_calls} calls, {deleted_distributions} distributions, {deleted_adjustments} adjustments")
-    
+            db.close()
+
     def _create_transaction_object(self, table_type: str, row: Dict[str, Any], fund_id: int):
         """Create transaction object from row data."""
         try:
             if table_type == "capital_calls":
                 call_date = self.data_parser.parse_date(row.get("date") or row.get("Date"))
                 amount = self.data_parser.parse_amount(row.get("amount") or row.get("Amount") or row.get("Called"))
-                
+
                 if call_date and amount is not None:
                     return CapitalCall(
                         fund_id=fund_id,
@@ -635,12 +1130,12 @@ class DataStorer:
                         call_type=row.get("type") or row.get("Type") or "Regular",
                         description=row.get("description") or row.get("Description") or ""
                     )
-            
+
             elif table_type == "distributions":
                 distribution_date = self.data_parser.parse_date(row.get("date") or row.get("Date"))
                 amount = self.data_parser.parse_amount(row.get("amount") or row.get("Amount") or row.get("Distributed"))
                 is_recallable = self.data_parser.parse_boolean(row.get("recallable") or row.get("Recallable"))
-                
+
                 if distribution_date and amount is not None:
                     return Distribution(
                         fund_id=fund_id,
@@ -650,11 +1145,11 @@ class DataStorer:
                         is_recallable=is_recallable,
                         description=row.get("description") or row.get("Description") or ""
                     )
-            
+
             elif table_type == "adjustments":
                 adjustment_date = self.data_parser.parse_date(row.get("date") or row.get("Date"))
                 amount = self.data_parser.parse_amount(row.get("amount") or row.get("Amount") or row.get("Adjustment"))
-                
+
                 if adjustment_date and amount is not None:
                     return Adjustment(
                         fund_id=fund_id,
@@ -665,108 +1160,14 @@ class DataStorer:
                         is_contribution_adjustment=amount < 0,
                         description=row.get("description") or row.get("Description") or ""
                     )
-        
+
         except Exception as e:
             logger.warning(f"Failed to create object for {table_type}: {e}")
-        
-        return None
-    
-    async def _is_duplicate(self, db, obj) -> bool:
-        """Check if transaction object already exists."""
-        try:
-            if isinstance(obj, CapitalCall):
-                existing = await db.query(CapitalCall).filter(
-                    CapitalCall.fund_id == obj.fund_id,
-                    CapitalCall.call_date == obj.call_date,
-                    CapitalCall.amount == obj.amount
-                ).first()
-            elif isinstance(obj, Distribution):
-                existing = await db.query(Distribution).filter(
-                    Distribution.fund_id == obj.fund_id,
-                    Distribution.distribution_date == obj.distribution_date,
-                    Distribution.amount == obj.amount
-                ).first()
-            elif isinstance(obj, Adjustment):
-                existing = await db.query(Adjustment).filter(
-                    Adjustment.fund_id == obj.fund_id,
-                    Adjustment.adjustment_date == obj.adjustment_date,
-                    Adjustment.amount == obj.amount
-                ).first()
-            else:
-                return True
-            
-            return existing is None
-        
-        except Exception as e:
-            logger.error(f"Duplicate check failed: {e}")
-            return False
 
-class DataParser:
-    """Responsible for parsing various data types."""
-    
-    DATE_FORMATS = [
-        "%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%B %d, %Y",
-        "%b %d, %Y", "%Y/%m/%d", "%d-%b-%Y", "%d-%B-%Y"
-    ]
-    
-    DATE_PATTERNS = [
-        r"(\d{4})-(\d{2})-(\d{2})",
-        r"(\d{2})/(\d{2})/(\d{4})",
-        r"(\d{2})-(\d{2})-(\d{4})"
-    ]
-    
-    def parse_date(self, date_str: str) -> Optional[datetime.date]:
-        """Parse date string into date object."""
-        if not date_str:
-            return None
-        
-        # Try direct parsing
-        for fmt in self.DATE_FORMATS:
-            try:
-                return datetime.strptime(date_str.strip(), fmt).date()
-            except ValueError:
-                continue
-        
-        # Try regex extraction
-        for pattern in self.DATE_PATTERNS:
-            match = re.search(pattern, date_str)
-            if match:
-                try:
-                    groups = match.groups()
-                    if len(groups) == 3:
-                        y, m, d = groups
-                        if len(y) == 4:  # YYYY-MM-DD
-                            return datetime(int(y), int(m), int(d)).date()
-                        else:  # Assume MM/DD/YYYY
-                            return datetime(int(d), int(m), int(y)).date()
-                except ValueError:
-                    continue
-        
         return None
+
     
-    def parse_amount(self, amount_str: str) -> Optional[float]:
-        """Parse amount string into float."""
-        if not amount_str:
-            return None
-        
-        # Clean string
-        cleaned = re.sub(r"[$,€£¥₹\s]", "", str(amount_str))
-        
-        # Handle parentheses for negatives
-        if cleaned.startswith("(") and cleaned.endswith(")"):
-            cleaned = "-" + cleaned[1:-1]
-        
-        try:
-            return float(cleaned)
-        except ValueError:
-            return None
-    
-    def parse_boolean(self, bool_str: str) -> bool:
-        """Parse boolean string."""
-        if not bool_str:
-            return False
-        
-        return str(bool_str).lower() in ["yes", "true", "1", "y", "recallable"]
+
 
 class DocumentProcessor:
     """Process PDF documents and extract structured data using docling"""
@@ -782,12 +1183,9 @@ class DocumentProcessor:
         # Dependency injection with defaults
         self.document_extractor = document_extractor or DocumentExtractor(TableParser())
         self.text_chunker = text_chunker or TextChunker()
-        # Pass database session to avoid None errors in Celery context
-        self.data_storer = data_storer or DataStorer(VectorStore(db_session), DataParser())
+        # Use None for db session to avoid hanging during initialization
+        self.data_storer = data_storer or DataStorer(VectorStore(db=None), DataParser())
         self.converter = converter or self._initialize_converter()
-
-        # Performance controls
-        self.processing_semaphore = asyncio.Semaphore(1)  # Single processing
     
     def _initialize_converter(self) -> DocumentConverter:
         """Initialize Docling converter with proper configuration."""
@@ -836,7 +1234,7 @@ class DocumentProcessor:
     
     async def process_document(self, file_path: str, document_id: int, fund_id: int) -> ProcessingResult:
         """
-        Process a PDF document and extract structured data (async version).
+        Process a PDF document and extract structured data.
 
         Args:
             file_path: Path to PDF file
@@ -846,12 +1244,11 @@ class DocumentProcessor:
         Returns:
             Processing result
         """
-        # For async contexts (like API endpoints), delegate to sync version
-        return await asyncio.to_thread(self.process_document_sync, file_path, document_id, fund_id)
+        return await self._process_document_async(file_path, document_id, fund_id)
 
-    def process_document_sync(self, file_path: str, document_id: int, fund_id: int) -> ProcessingResult:
+    async def _process_document_async(self, file_path: str, document_id: int, fund_id: int) -> ProcessingResult:
         """
-        Process a PDF document and extract structured data (sync version for Celery).
+        Process a PDF document and extract structured data.
 
         Args:
             file_path: Path to PDF file
@@ -874,11 +1271,13 @@ class DocumentProcessor:
 
             # Process text synchronously
             text_chunks = self.text_chunker.chunk_text(text_content)
-            text_chunks = self.text_chunker.post_process_chunks(text_chunks)
+            logger.info(f"✓ Text chunking completed: {len(text_chunks)} chunks created")
 
-            # Store data synchronously using synchronous database operations
-            chunks_stored = self._store_chunks_sync(text_chunks, document_id, fund_id)
-            tables_stored = self._store_tables_sync(tables_data, fund_id)
+            # Store data asynchronously
+            logger.info("Starting vector storage phase...")
+            chunks_stored = await self.data_storer.store_chunks(text_chunks, document_id, fund_id)
+            logger.info(f"Vector storage completed: {chunks_stored}")
+            tables_stored = await self.data_storer.store_tables(tables_data, fund_id)
 
             # Calculate statistics
             processing_time = time.time() - start_time
@@ -917,187 +1316,25 @@ class DocumentProcessor:
                 error=str(e)
             )
 
-    def _store_chunks_sync(self, chunks: List[Dict[str, Any]], document_id: int, fund_id: int) -> bool:
-        """Store chunks using synchronous database access."""
+    def process_document_sync(self, file_path: str, document_id: int, fund_id: int) -> ProcessingResult:
+        """
+        Process a PDF document and extract structured data (sync version for Celery).
+
+        Args:
+            file_path: Path to PDF file
+            document_id: Document ID
+            fund_id: Fund ID
+
+        Returns:
+            Processing result
+        """
+        import asyncio
+
+        # Create new event loop for synchronous context
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
-            # Add fund_id to each chunk's metadata before storing
-            for chunk in chunks:
-                if "metadata" not in chunk:
-                    chunk["metadata"] = {}
-                chunk["metadata"]["document_id"] = document_id
-                chunk["metadata"]["fund_id"] = fund_id
-
-            # Use synchronous version of vector store operations
-            # Create a synchronous vector store instance
-            from app.services.vector_store import VectorStore
-            sync_vector_store = VectorStore(db=None)  # No DB session needed for sync operations
-
-            # Generate embeddings synchronously
-            for chunk in chunks:
-                try:
-                    # Get embedding synchronously
-                    text = chunk["content"]
-                    embedding = sync_vector_store._get_embedding_sync(text)
-                    chunk["embedding"] = embedding
-                except Exception as e:
-                    logger.error(f"Failed to generate embedding for chunk: {e}")
-                    chunk["embedding"] = None
-
-            # Store synchronously using direct SQL
-            return self._store_chunks_direct_sql(chunks, document_id, fund_id)
-
-        except Exception as e:
-            logger.error(f"Failed to store chunks synchronously: {e}")
-            return False
-
-    def _store_chunks_direct_sql(self, chunks: List[Dict[str, Any]], document_id: int, fund_id: int) -> bool:
-        """Store chunks directly using SQLAlchemy synchronously."""
-        try:
-            from app.db.session import SessionLocal
-            import json
-
-            db = SessionLocal()
-            try:
-                for chunk in chunks:
-                    if chunk.get("embedding") is None:
-                        continue  # Skip chunks without embeddings
-
-                    embedding_list = chunk["embedding"].tolist()
-                    metadata_json = json.dumps(chunk.get("metadata", {}))
-
-                    # Insert directly using SQLAlchemy
-                    from sqlalchemy import text
-                    insert_sql = text("""
-                        INSERT INTO document_embeddings (document_id, fund_id, content, embedding, metadata)
-                        VALUES (:document_id, :fund_id, :content, :embedding, :metadata)
-                    """)
-
-                    db.execute(insert_sql, {
-                        "document_id": document_id,
-                        "fund_id": fund_id,
-                        "content": chunk["content"],
-                        "embedding": f"[{','.join(map(str, embedding_list))}]",
-                        "metadata": metadata_json
-                    })
-
-                db.commit()
-                logger.info(f"Successfully stored {len([c for c in chunks if c.get('embedding') is not None])} chunks")
-                return True
-
-            except Exception as e:
-                db.rollback()
-                logger.error(f"Database error storing chunks: {e}")
-                raise
-            finally:
-                db.close()
-
-        except Exception as e:
-            logger.error(f"Failed to store chunks with direct SQL: {e}")
-            return False
-
-    def _store_tables_sync(self, tables_data: Dict[str, List[Dict[str, Any]]], fund_id: int) -> int:
-        """Store tables using synchronous database access."""
-        try:
-            # Create synchronous version of table storage
-            return self._store_tables_direct_sql(tables_data, fund_id)
-        except Exception as e:
-            logger.error(f"Failed to store tables synchronously: {e}")
-            return 0
-
-    def _store_tables_direct_sql(self, tables_data: Dict[str, List[Dict[str, Any]]], fund_id: int) -> int:
-        """Store table data directly using SQLAlchemy synchronously."""
-        from app.db.session import SessionLocal
-        from app.models.transaction import CapitalCall, Distribution, Adjustment
-        import json
-
-        stored_count = 0
-        data_parser = DataParser()
-
-        db = SessionLocal()
-        try:
-            # Clear existing data for this fund
-            db.query(CapitalCall).filter(CapitalCall.fund_id == fund_id).delete()
-            db.query(Distribution).filter(Distribution.fund_id == fund_id).delete()
-            db.query(Adjustment).filter(Adjustment.fund_id == fund_id).delete()
-            db.commit()
-
-            # Collect objects for bulk insert
-            objects_to_insert = []
-
-            for table_type, tables in tables_data.items():
-                if table_type == "processing_method":
-                    continue
-
-                for table in tables:
-                    rows = table.get("rows", [])
-                    for row in rows:
-                        obj = self._create_transaction_object_sync(table_type, row, fund_id, data_parser)
-                        if obj:
-                            objects_to_insert.append(obj)
-
-            # Bulk insert
-            if objects_to_insert:
-                db.add_all(objects_to_insert)
-                db.commit()
-                stored_count = len(objects_to_insert)
-                logger.info(f"Stored {stored_count} transactions synchronously")
-
-            return stored_count
-
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Database error storing tables: {e}")
-            raise
+            return loop.run_until_complete(self._process_document_async(file_path, document_id, fund_id))
         finally:
-            db.close()
+            loop.close()
 
-    def _create_transaction_object_sync(self, table_type: str, row: Dict[str, Any], fund_id: int, data_parser: 'DataParser'):
-        """Create transaction object synchronously."""
-        try:
-            if table_type == "capital_calls":
-                call_date = data_parser.parse_date(row.get("date") or row.get("Date"))
-                amount = data_parser.parse_amount(row.get("amount") or row.get("Amount") or row.get("Called"))
-
-                if call_date and amount is not None:
-                    return CapitalCall(
-                        fund_id=fund_id,
-                        call_date=call_date,
-                        amount=amount,
-                        call_type=row.get("type") or row.get("Type") or "Regular",
-                        description=row.get("description") or row.get("Description") or ""
-                    )
-
-            elif table_type == "distributions":
-                distribution_date = data_parser.parse_date(row.get("date") or row.get("Date"))
-                amount = data_parser.parse_amount(row.get("amount") or row.get("Amount") or row.get("Distributed"))
-                is_recallable = data_parser.parse_boolean(row.get("recallable") or row.get("Recallable"))
-
-                if distribution_date and amount is not None:
-                    return Distribution(
-                        fund_id=fund_id,
-                        distribution_date=distribution_date,
-                        amount=amount,
-                        distribution_type=row.get("type") or row.get("Type") or "Return",
-                        is_recallable=is_recallable,
-                        description=row.get("description") or row.get("Description") or ""
-                    )
-
-            elif table_type == "adjustments":
-                adjustment_date = data_parser.parse_date(row.get("date") or row.get("Date"))
-                amount = data_parser.parse_amount(row.get("amount") or row.get("Amount") or row.get("Adjustment"))
-
-                if adjustment_date and amount is not None:
-                    return Adjustment(
-                        fund_id=fund_id,
-                        adjustment_date=adjustment_date,
-                        amount=amount,
-                        adjustment_type=row.get("type") or row.get("Type") or "Fee",
-                        category=row.get("category") or row.get("Category") or "General",
-                        is_contribution_adjustment=amount < 0,
-                        description=row.get("description") or row.get("Description") or ""
-                    )
-
-        except Exception as e:
-            logger.warning(f"Failed to create object for {table_type}: {e}")
-
-        return None
