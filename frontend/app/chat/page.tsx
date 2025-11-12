@@ -4,6 +4,7 @@ import { useState, useRef, useEffect } from 'react'
 import { Send, Loader2, FileText, File } from 'lucide-react'
 import { chatApi, documentApi } from '@/lib/api'
 import { formatCurrency } from '@/lib/utils'
+import { AIResponseFormatter } from '@/components/AIResponseFormatter'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -11,6 +12,21 @@ interface Message {
   sources?: any[]
   metrics?: any
   timestamp: Date
+  isError?: boolean
+  canRetry?: boolean
+  originalQuery?: string
+}
+
+interface SourceDocument {
+  content: string
+  metadata: any
+  score?: number
+  document_name?: string
+  page_number?: number
+  chunk_index?: number
+  confidence_score?: number
+  citation_text?: string
+  is_complete?: boolean
 }
 
 interface Document {
@@ -18,6 +34,7 @@ interface Document {
   file_name: string
   parsing_status: string
   fund_id?: number
+  upload_date?: string
 }
 
 export default function ChatPage() {
@@ -28,6 +45,42 @@ export default function ChatPage() {
   const [documents, setDocuments] = useState<Document[]>([])
   const [selectedDocumentId, setSelectedDocumentId] = useState<number>()
   const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  const handleRetry = async (originalQuery: string) => {
+    if (loading) return
+
+    setLoading(true)
+
+    try {
+      const response = await chatApi.query(originalQuery, undefined, conversationId, selectedDocumentId)
+
+      // Replace the error message with success message
+      setMessages(prev => prev.map(msg =>
+        msg.originalQuery === originalQuery && msg.isError
+          ? {
+              role: 'assistant',
+              content: response.answer,
+              sources: response.sources,
+              metrics: response.metrics,
+              timestamp: new Date()
+            }
+          : msg
+      ))
+    } catch (error: any) {
+      // Update the error message (retry failed again)
+      setMessages(prev => prev.map(msg =>
+        msg.originalQuery === originalQuery && msg.isError
+          ? {
+              ...msg,
+              content: `Sorry, I encountered an error: ${error.response?.data?.detail || error.message}`,
+              timestamp: new Date()
+            }
+          : msg
+      ))
+    } finally {
+      setLoading(false)
+    }
+  }
 
   useEffect(() => {
     // Load documents and create conversation on mount
@@ -60,11 +113,12 @@ export default function ChatPage() {
     }
 
     setMessages(prev => [...prev, userMessage])
+    const currentQuery = input
     setInput('')
     setLoading(true)
 
     try {
-      const response = await chatApi.query(input, undefined, conversationId, selectedDocumentId)
+      const response = await chatApi.query(currentQuery, undefined, conversationId, selectedDocumentId)
 
       const assistantMessage: Message = {
         role: 'assistant',
@@ -76,10 +130,18 @@ export default function ChatPage() {
 
       setMessages(prev => [...prev, assistantMessage])
     } catch (error: any) {
+      const isNetworkError = error.code === 'NETWORK_ERROR' ||
+                            error.message?.includes('Network Error') ||
+                            error.message?.includes('Failed to fetch') ||
+                            !error.response
+
       const errorMessage: Message = {
         role: 'assistant',
         content: `Sorry, I encountered an error: ${error.response?.data?.detail || error.message}`,
-        timestamp: new Date()
+        timestamp: new Date(),
+        isError: true,
+        canRetry: isNetworkError,
+        originalQuery: currentQuery
       }
       setMessages(prev => [...prev, errorMessage])
     } finally {
@@ -109,7 +171,7 @@ export default function ChatPage() {
               <option value="">General questions (no specific document)</option>
               {documents.map((doc) => (
                 <option key={doc.id} value={doc.id}>
-                  {doc.file_name} {doc.parsing_status === 'completed' ? '✅' : doc.parsing_status === 'processing' ? '⏳' : '❌'}
+                  {doc.file_name} ({doc.upload_date ? new Date(doc.upload_date).toLocaleString() : 'Unknown date'}) - {doc.parsing_status}
                 </option>
               ))}
             </select>
@@ -180,7 +242,12 @@ export default function ChatPage() {
           )}
 
           {messages.map((message, index) => (
-            <MessageBubble key={index} message={message} />
+            <MessageBubble
+              key={index}
+              message={message}
+              onRetry={handleRetry}
+              isLoading={loading}
+            />
           ))}
 
           {loading && (
@@ -219,7 +286,11 @@ export default function ChatPage() {
   )
 }
 
-function MessageBubble({ message }: { message: Message }) {
+function MessageBubble({ message, onRetry, isLoading }: {
+  message: Message;
+  onRetry?: (query: string) => void;
+  isLoading?: boolean;
+}) {
   const isUser = message.role === 'user'
 
   return (
@@ -229,10 +300,27 @@ function MessageBubble({ message }: { message: Message }) {
           className={`rounded-lg p-4 ${
             isUser
               ? 'bg-blue-600 text-white'
+              : message.isError
+              ? 'bg-red-100 text-red-900 border border-red-300'
               : 'bg-gray-100 text-gray-900'
           }`}
         >
-          <p className="whitespace-pre-wrap">{message.content}</p>
+          {isUser ? (
+            <p className="whitespace-pre-wrap">{message.content}</p>
+          ) : (
+            <AIResponseFormatter content={message.content} />
+          )}
+          {message.canRetry && message.originalQuery && onRetry && (
+            <div className="mt-3 pt-3 border-t border-red-200">
+              <button
+                onClick={() => onRetry(message.originalQuery!)}
+                disabled={isLoading}
+                className="px-3 py-1 bg-red-600 text-white text-sm rounded hover:bg-red-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isLoading ? 'Retrying...' : 'Retry'}
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Metrics Display */}
@@ -270,17 +358,47 @@ function MessageBubble({ message }: { message: Message }) {
               <summary className="px-4 py-2 cursor-pointer text-sm font-medium text-gray-700 hover:bg-gray-50">
                 View Sources ({message.sources.length})
               </summary>
-              <div className="px-4 py-3 space-y-2 border-t">
-                {message.sources.slice(0, 3).map((source, idx) => (
-                  <div key={idx} className="text-xs bg-gray-50 p-2 rounded">
-                    <p className="text-gray-700 line-clamp-2">{source.content}</p>
-                    {source.score && (
-                      <p className="text-gray-500 mt-1">
-                        Relevance: {(source.score * 100).toFixed(0)}%
-                      </p>
-                    )}
+              <div className="px-4 py-3 space-y-3 border-t">
+                {message.sources.slice(0, 3).map((source: SourceDocument, idx) => (
+                  <div key={idx} className="text-xs bg-gray-50 p-3 rounded border">
+                    {/* Clean Citation Header */}
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center space-x-2">
+                        <FileText className="w-3 h-3 text-blue-600" />
+                        <span className="font-medium text-blue-900">
+                          {source.citation_text || source.document_name || `Source ${idx + 1}`}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Source Content */}
+                    <div className="text-gray-700 mb-2">
+                      <AIResponseFormatter
+                        content={source.content}
+                        className="text-xs prose-xs"
+                      />
+                    </div>
+
+                    {/* Clean Metadata */}
+                    <div className="flex items-center justify-between text-gray-500">
+                      <div className="flex items-center space-x-3">
+                        {source.page_number && (
+                          <span>Page {source.page_number}</span>
+                        )}
+                        {source.score && (
+                          <span>Relevance: {(source.score * 100).toFixed(0)}%</span>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 ))}
+
+                {/* Show more indicator */}
+                {message.sources.length > 3 && (
+                  <div className="text-center text-xs text-gray-500 py-2">
+                    And {message.sources.length - 3} more sources...
+                  </div>
+                )}
               </div>
             </details>
           </div>

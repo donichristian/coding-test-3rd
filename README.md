@@ -69,18 +69,16 @@ This repository contains a **project scaffold** to help you get started quickly:
 The following **core functionalities are NOT implemented** and need to be built by you:
 
 #### 1. Document Processing Pipeline (Phase 2) - **CRITICAL**
-- [x] Model pre-loading during Docker build (OCR models cached)
-- [x] PDF parsing with Docling and pdfplumber fallback
-- [x] Table detection and extraction logic
-- [x] Intelligent table classification (capital calls vs distributions vs adjustments)
-- [x] Data validation and cleaning
-- [x] Error handling for malformed PDFs
-- [ ] Background task processing (Celery integration) - Optional enhancement
+- [ ] PDF parsing with pdfplumber (integrate and test)
+- [ ] Table detection and extraction logic
+- [ ] Intelligent table classification (capital calls vs distributions vs adjustments)
+- [ ] Data validation and cleaning
+- [ ] Error handling for malformed PDFs
+- [ ] Background task processing (Celery integration)
 
 **Files implemented:**
-- `backend/app/services/document_processor.py` - Document processing with Docling
-- `backend/app/services/table_parser.py` - Table extraction and classification
-- `backend/preload_models.py` - Model pre-loading script for Docker builds
+- `backend/app/services/document_processor.py` (skeleton provided)
+- `backend/app/services/table_parser.py` (needs implementation)
 
 #### 2. Vector Store & RAG System (Phase 3) - **CRITICAL**
 - [ ] Text chunking strategy implementation
@@ -315,29 +313,74 @@ cp .env.example .env
 # DATABASE_URL=postgresql://user:password@localhost:5432/funddb
 ```
 
-3. **Choose your development approach**
+3. **Start with Docker Compose**
 
 **Note**: The first build will take longer as it pre-downloads OCR and ML models (RapidOCR, Docling, sentence-transformers) during the Docker build process. This ensures fast document processing without runtime model downloads.
 
-#### Development (Fast iteration, bind mounts)
+#### Makefile Commands:
 ```bash
 # Build development images (includes model pre-loading)
-make dev-build
+make build
 
 # Start development services with hot reload
-make dev
+make up
 
-# Or manually:
-docker-compose --profile dev up -d
-```
+# Or:
+docker-compose up -d
 
-#### Production (Optimized builds, new images)
-```bash
-# Build and deploy production images (includes model pre-loading)
-make prod-deploy
+# Main commands
+make help             # Show all available commands
+make up               # Start all services
+make down             # Stop all services
+make build            # Build all images
+make logs             # Show logs for all services
 
-# Or manually:
-docker-compose --profile prod up -d
+# Service-specific logs
+make logs-backend     # Show backend logs
+make logs-frontend    # Show frontend logs
+make logs-postgres    # Show PostgreSQL logs
+make logs-redis       # Show Redis logs
+make logs-celery      # Show Celery worker logs
+
+# Service management
+make status           # Show status of all containers
+make restart          # Restart all services
+make restart-backend  # Restart backend service
+make restart-frontend # Restart frontend service
+make restart-celery   # Restart Celery worker service
+
+# Database operations
+make init-db          # Initialize database
+make db-shell         # Connect to PostgreSQL shell
+make backup-db        # Backup database to file
+make restore-db FILE=backup.sql  # Restore database from backup
+make reset-db-data    # Clear all database data (keeps tables)
+
+# Shell access
+make backend-shell    # Open shell in backend container
+make frontend-shell   # Open shell in frontend container
+
+# Testing
+make test             # Run all tests
+make test-backend     # Run backend tests
+make test-backend-file FILE=test_file.py  # Run specific backend test file
+make test-query-engine    # Run query engine tests
+make test-document-processor  # Run document processor tests
+make test-frontend    # Run frontend tests
+
+# Health checks
+make health           # Check service health
+
+# Cleanup
+make clean            # Stop all services and clean containers
+make clean-images     # Remove unused images
+make clean-volumes    # Remove unused volumes (WARNING: destroys data)
+
+# Setup
+make setup            # Initial project setup
+make docs             # Open API documentation
+make info             # Show environment information
+
 ```
 
 4. **Access the application**
@@ -355,56 +398,6 @@ docker-compose --profile prod up -d
 - Go to http://localhost:3000/chat
 - Try: "What is DPI?"
 - Try: "Calculate the current DPI for this fund"
-
-### Development vs Production
-
-| Feature | Development | Production |
-|---------|-------------|------------|
-| **Image Building** | Cached layers, faster rebuilds | Clean builds, cache-busting |
-| **Code Changes** | Hot reload via bind mounts | Requires image rebuild |
-| **Dependencies** | Lockfile ignored for speed | Lockfile enforced for reproducibility |
-| **Performance** | Development optimizations | Production optimizations |
-| **Security** | Root user allowed | Non-root user enforced |
-| **Caching** | Aggressive caching | Minimal caching for consistency |
-| **Model Pre-loading** | Models pre-downloaded during build | Models pre-downloaded during build |
-
-#### When to use Development:
-- Active development and debugging
-- Frequent code changes
-- Testing new features
-- Local development workflow
-
-#### When to use Production:
-- Demo deployments
-- Staging environments
-- CI/CD pipelines
-- Performance testing
-- Production deployments
-
-#### Makefile Commands:
-```bash
-# Development
-make dev              # Start dev environment
-make dev-build        # Build dev images
-make dev-up           # Start dev services
-make dev-down         # Stop dev services
-
-# Production
-make prod             # Start prod environment
-make prod-build       # Build prod images (--no-cache)
-make prod-up          # Start prod services
-make prod-deploy      # Build + deploy prod
-
-# Tagging & Deployment
-make tag-prod TAG=v1.0.0    # Tag images with version
-make push-prod TAG=v1.0.0   # Push tagged images
-
-# Cleanup
-make clean             # Stop all services
-make clean-images      # Remove unused images
-make clean-volumes     # Remove unused volumes
-make clean-all         # Complete cleanup
-```
 
 ---
 
@@ -728,13 +721,6 @@ curl -X POST "http://localhost:8000/api/chat/query" \
 
 ## Troubleshooting
 
-### Model Download Issues
-**Problem**: Document processing is slow on first upload
-**Solution**: 
-- Ensure models were pre-loaded during Docker build (check build logs for "Model pre-loading complete")
-- Rebuild the Docker image: `make dev-build` or `make prod-build`
-- Models are cached in the Docker image, so subsequent uploads should be fast
-
 ### Document Parsing Issues
 **Problem**: Docling can't extract tables
 **Solution**: 
@@ -763,14 +749,6 @@ curl -X POST "http://localhost:8000/api/chat/query" \
 - Add CORS middleware in FastAPI
 - Allow origin: http://localhost:3000
 - Check network configuration in Docker
-
-### Slow Document Processing
-**Problem**: Document upload takes too long (>30 seconds)
-**Solution**:
-- Verify models were pre-loaded: Check Docker build logs for "Model pre-loading complete"
-- Rebuild images if models weren't pre-loaded: `make dev-build` or `make prod-build`
-- Check network connectivity (models download from external sources during build)
-- Processing should be fast (2-5 seconds) once models are cached
 
 ---
 

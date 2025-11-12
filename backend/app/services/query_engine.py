@@ -24,30 +24,45 @@ class QueryEngine:
         query: str,
         fund_id: Optional[int] = None,
         document_id: Optional[int] = None,
-        conversation_history: List[Dict[str, str]] = None
+        conversation_history: Optional[List[Dict[str, str]]] = None
     ) -> Dict[str, Any]:
         """
-        Process a user query using RAG
+        Process a user query using RAG with conversation context
 
         Args:
             query: User question
             fund_id: Optional fund ID for context
-            conversation_history: Previous conversation messages
+            document_id: Optional document ID (deprecated, use fund_id)
+            conversation_history: Previous conversation messages for context
 
         Returns:
             Response with answer, sources, and metrics
         """
         start_time = time.time()
 
-        # Use the new RAG engine for processing
-        result = self.rag_engine.query(query, fund_id)
+        # Use the new RAG engine for processing with conversation history
+        result = await self.rag_engine.query(query, fund_id, conversation_history)
+
+        # If no context was retrieved, try synchronous retrieval as fallback
+        if not result.get("sources") or len(result.get("sources", [])) == 0:
+            try:
+                sync_results = self.rag_engine.context_retriever.retrieve_sync(query, fund_id)
+                if sync_results:
+                    result["sources"] = sync_results
+                    result["context_used"] = True
+            except Exception as e:
+                print(f"Sync context retrieval also failed: {e}")
 
         # Add additional metadata
         result["processing_time"] = round(time.time() - start_time, 2)
 
-        # Format sources for backward compatibility
+        # Ensure sources are properly formatted
         if "sources" not in result:
             result["sources"] = []
+
+        # Rename 'response' to 'answer' for API compatibility
+        if "response" in result:
+            result["answer"] = result.pop("response")
 
         # Get metrics if fund_id provided and not already included
         if fund_id and "metrics" not in result:

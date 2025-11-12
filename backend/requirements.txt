@@ -34,12 +34,13 @@ google-genai>=0.8.0
 langchain>=0.1.0
 langchain-openai>=0.1.0
 langchain-community>=0.0.20
+langchain-google-genai>=1.0.0
 
 # Vector Store (using pgvector - PostgreSQL extension)
 # No additional packages needed - pgvector is a PostgreSQL extension
 
 # Embeddings
-sentence-transformers==2.2.2
+sentence-transformers>=2.7.0
 
 # Task Queue
 celery==5.3.4
@@ -61,6 +62,7 @@ pytest==7.4.4
 pytest-asyncio==0.23.3
 pytest-cov==4.1.0
 httpx==0.26.0
+anyio==4.11.0
 
 # Development
 black==23.12.1
