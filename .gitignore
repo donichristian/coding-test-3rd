@@ -52,3 +52,12 @@ htmlcov/
 
 .cursor
 .kilocode
+
+
+# misc
+CELERY_SECURITY_FIX.md
+PERFORMANCE_REGRESSION_FINAL_FIX.md
+PERFORMANCE_STATUS_FIXES.md
+test_performance_fixes.py
+test_security_fix.py
+validate_performance_restoration.py

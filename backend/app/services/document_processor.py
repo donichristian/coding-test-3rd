@@ -19,6 +19,7 @@ from app.models.transaction import CapitalCall, Distribution, Adjustment
 from app.models.document import Document
 from app.models.fund import Fund
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +102,7 @@ class DocumentService:
         error_message: str = None
     ) -> bool:
         """
-        Update document parsing status.
+        Update document parsing status efficiently.
 
         Args:
             document_id: Document ID
@@ -194,14 +195,26 @@ class DoclingDocumentProcessor:
             from app.core.celery_app import get_cached_model
             cached_converter = get_cached_model('docling_converter')
             if cached_converter is not None:
-                logger.info("Using cached Docling converter")
+                logger.info("Using cached Docling converter (OCR disabled)")
                 return cached_converter
         except (ImportError, Exception):
             pass  # Not in Celery context or cache miss
 
-        # Fallback to creating a new converter
-        logger.info("Creating new Docling converter")
-        return DocumentConverter()
+        # Fallback to creating a new converter without OCR
+        logger.info("Creating new Docling converter (OCR disabled for performance)")
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.document_converter import PdfFormatOption
+        from docling.datamodel.base_models import InputFormat
+        
+        pipeline_options = PdfPipelineOptions()
+        pipeline_options.do_ocr = False  # Performance optimization
+        pipeline_options.do_table_structure = True
+        
+        return DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+            }
+        )
 
     async def process_document(
         self, 
@@ -600,14 +613,19 @@ class DoclingDocumentProcessor:
             fund_id: Associated fund ID
         """
         try:
-            # Store text chunks in vector database
+            # Store text chunks in vector database first
             if text_chunks:
+                logger.info("Starting vector store operations...")
                 chunks_stored = self.vector_store.store_chunks_sync(text_chunks)
-                logger.info(f"Stored {len(text_chunks)} text chunks" if chunks_stored else "Failed to store text chunks")
+                if chunks_stored:
+                    logger.info(f"✓ Successfully stored {len(text_chunks)} text chunks")
+                else:
+                    logger.warning("Failed to store text chunks in vector database")
 
             # Store table data in PostgreSQL
+            logger.info("Starting PostgreSQL table storage...")
             tables_stored = await self._store_table_data(tables_data, fund_id)
-            logger.info(f"Stored {tables_stored} table records")
+            logger.info(f"✓ Successfully stored {tables_stored} table records")
 
         except Exception as e:
             logger.error(f"Failed to store processed data: {e}")

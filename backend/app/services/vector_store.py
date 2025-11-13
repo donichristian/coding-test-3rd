@@ -143,10 +143,19 @@ class VectorStore:
             except (ImportError, Exception):
                 pass  # Not in Celery context or cache miss
 
-            # Skip model initialization during initialization to avoid hanging
-            # The model will be lazy-loaded when actually needed
-            logger.debug("Sentence-transformers model will be loaded on-demand")
-            return True
+            # Try to load model immediately for non-Celery contexts
+            try:
+                from sentence_transformers import SentenceTransformer
+                logger.info("Loading sentence-transformers model for non-Celery context...")
+                self._embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+                logger.info("✓ Sentence-transformers model loaded successfully for API context")
+                return True
+            except Exception as e:
+                logger.warning(f"Could not load sentence-transformers model: {e}")
+                # Model will be lazy-loaded when actually needed
+                logger.debug("Sentence-transformers model will be loaded on-demand")
+                return True
+                
         except Exception as e:
             logger.warning(f"Error in sentence-transformers initialization: {e}")
             return False

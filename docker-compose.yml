@@ -50,7 +50,7 @@ services:
     volumes:
       - ./backend:/app
       - ./files:/app/files
-      - backend_uploads:/app/uploads
+      - ./uploads:/app/uploads
     depends_on:
       postgres:
         condition: service_healthy
@@ -79,7 +79,7 @@ services:
     volumes:
       - ./backend:/app
       - ./files:/app/files
-      - backend_uploads:/app/uploads
+      - ./uploads:/app/uploads
     depends_on:
       postgres:
         condition: service_healthy
@@ -106,4 +106,3 @@ services:
 volumes:
   postgres_data:
   redis_data:
-  backend_uploads:

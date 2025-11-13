@@ -32,6 +32,7 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,  # Fair task distribution
     task_acks_late=True,  # Acknowledge after task completion
     worker_max_tasks_per_child=50,  # Restart worker after 50 tasks
+    broker_connection_retry_on_startup = True
 )
 
 # Global model cache for Celery workers
@@ -55,9 +56,9 @@ def preload_models_on_worker_init(sender, **kwargs):
             from docling.document_converter import PdfFormatOption
             from docling.datamodel.base_models import InputFormat
 
-            logger.info("Loading Docling converter with OCR...")
+            logger.info("Loading Docling converter with intelligent OCR disabled...")
             pipeline_options = PdfPipelineOptions()
-            pipeline_options.do_ocr = True
+            pipeline_options.do_ocr = False  # DISABLED - OCR only when needed
             pipeline_options.do_table_structure = True
 
             _model_cache['docling_converter'] = DocumentConverter(
