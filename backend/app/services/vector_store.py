@@ -44,24 +44,6 @@ class VectorStore:
     - Metadata filtering for search
     """
 
-    # Embedding model configurations
-    EMBEDDING_CONFIGS = {
-        "sentence-transformers": {
-            "model": "all-MiniLM-L6-v2",
-            "dimensions": 384,
-            "description": "Local sentence-transformers model"
-        },
-        "gemini": {
-            "model": "gemini-embedding-001",
-            "dimensions": 768,
-            "description": "Google Gemini embeddings"
-        },
-        "openai": {
-            "model": "text-embedding-3-small",
-            "dimensions": 1536,
-            "description": "OpenAI embeddings"
-        }
-    }
 
     def __init__(self, db: Optional[Session] = None):
         """
@@ -72,7 +54,7 @@ class VectorStore:
         """
         self.db = db
         self.embedding_provider = self._initialize_embeddings()
-        self.embedding_dimensions = self.EMBEDDING_CONFIGS.get(
+        self.embedding_dimensions = settings.EMBEDDING_CONFIGS.get(
             self.embedding_provider, {"dimensions": 384}
         )["dimensions"]
 
@@ -119,7 +101,7 @@ class VectorStore:
         for provider_name, init_func in providers:
             try:
                 if init_func():
-                    config = self.EMBEDDING_CONFIGS[provider_name]
+                    config = settings.EMBEDDING_CONFIGS[provider_name]
                     logger.info(f"✓ Using {provider_name} embeddings: {config['description']}")
                     return provider_name
             except Exception as e:
@@ -130,32 +112,21 @@ class VectorStore:
         return None
 
     def _init_sentence_transformers(self) -> bool:
-        """Initialize sentence-transformers model."""
+        """Initialize sentence-transformers model using lazy loading."""
         try:
-            # First try to get from Celery cache
+            # Try to get from lazy model loader
             try:
-                from app.core.celery_app import get_cached_model
-                cached_model = get_cached_model('sentence_transformers')
-                if cached_model is not None:
-                    logger.info("Using cached sentence-transformers model from Celery")
-                    self._embedding_model = cached_model
-                    return True
-            except (ImportError, Exception):
-                pass  # Not in Celery context or cache miss
-
-            # Try to load model immediately for non-Celery contexts
-            try:
-                from sentence_transformers import SentenceTransformer
-                logger.info("Loading sentence-transformers model for non-Celery context...")
-                self._embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-                logger.info("✓ Sentence-transformers model loaded successfully for API context")
+                from lazy_model_loader import get_sentence_transformer
+                self._embedding_model = get_sentence_transformer()
+                logger.info("Using lazy-loaded sentence-transformers model")
                 return True
             except Exception as e:
-                logger.warning(f"Could not load sentence-transformers model: {e}")
-                # Model will be lazy-loaded when actually needed
-                logger.debug("Sentence-transformers model will be loaded on-demand")
-                return True
-                
+                logger.warning(f"Could not get lazy-loaded sentence transformer: {e}")
+
+            # Fallback: Model will be lazy-loaded when actually needed
+            logger.debug("Sentence-transformers model will be loaded on-demand")
+            return True
+
         except Exception as e:
             logger.warning(f"Error in sentence-transformers initialization: {e}")
             return False
@@ -228,7 +199,7 @@ class VectorStore:
         logger.info(f"Storing {len(chunks)} text chunks in vector database")
 
         # Process chunks in batches to avoid overwhelming the API
-        batch_size = 10
+        batch_size = settings.BATCH_SIZE
         total_stored = 0
 
         async with self._get_db_session() as db:
@@ -308,7 +279,7 @@ class VectorStore:
 
         logger.info(f"Storing {len(chunks)} text chunks in vector database")
 
-        batch_size = 10
+        batch_size = settings.BATCH_SIZE
         total_stored = 0
 
         db = SessionLocal()
@@ -397,7 +368,8 @@ class VectorStore:
         self,
         query: str,
         k: int = 5,
-        filter_metadata: Optional[Dict[str, Any]] = None
+        filter_metadata: Optional[Dict[str, Any]] = None,
+        similarity_threshold: Optional[float] = None
     ) -> List[Dict[str, Any]]:
         """
         Synchronous version of similarity_search for API endpoints.
@@ -406,6 +378,7 @@ class VectorStore:
             query: Search query text
             k: Number of results to return (default: 5)
             filter_metadata: Optional metadata filters
+            similarity_threshold: Minimum similarity score (uses config.SIMILARITY_THRESHOLD if None)
 
         Returns:
             List of similar documents with similarity scores
@@ -416,6 +389,10 @@ class VectorStore:
         if k <= 0:
             raise ValueError("k must be positive")
 
+        # Use config value if threshold not specified
+        if similarity_threshold is None:
+            similarity_threshold = settings.SIMILARITY_THRESHOLD
+
         db = SessionLocal()
         try:
             # Generate query embedding synchronously
@@ -424,15 +401,19 @@ class VectorStore:
 
             # Build WHERE clause for metadata filters
             where_conditions = []
-            params = {"k": k}
+            params = {"k": k * settings.SIMILARITY_SEARCH_MULTIPLIER}  # Get more results to account for filtering
 
             if filter_metadata:
                 for key, value in filter_metadata.items():
                     if key in ["document_id", "fund_id"]:
-                        where_conditions.append(f"{key} = :{key}")
-                        params[key] = value
+                        if value is not None:  # Only filter if value is not None
+                            where_conditions.append(f"{key} = :{key}")
+                            params[key] = value
+                        else:
+                            logger.debug(f"Skipping {key} filter because value is None")
 
             where_clause = " AND ".join(where_conditions) if where_conditions else ""
+            logger.debug(f"WHERE clause: '{where_clause}', params: {params}")
 
             # Search using pgvector cosine similarity
             search_sql = text(f"""
@@ -454,13 +435,17 @@ class VectorStore:
                 **params
             })
 
-            # Format results
+            # Format results and apply similarity threshold
             results = []
             for row in result:
                 score = float(row[5])
                 # Validate and clamp similarity score
                 if not (0.0 <= score <= 1.0) or np.isnan(score) or np.isinf(score):
                     score = 0.0
+
+                # Apply similarity threshold filter
+                if score < similarity_threshold:
+                    continue
 
                 # Parse metadata JSON
                 metadata = row[4]
@@ -479,7 +464,19 @@ class VectorStore:
                     "score": score
                 })
 
-            logger.debug(f"Similarity search returned {len(results)} results for query: {query[:50]}...")
+            # Limit to top k after filtering
+            results = results[:k]
+
+            # Debug: Log all similarity scores before filtering
+            all_scores = []
+            for row in result:
+                score = float(row[5])
+                if not (0.0 <= score <= 1.0) or np.isnan(score) or np.isinf(score):
+                    score = 0.0
+                all_scores.append(score)
+
+            logger.debug(f"All similarity scores for query '{query[:50]}...': {sorted(all_scores, reverse=True)[:10]}")
+            logger.debug(f"Similarity search returned {len(results)} results above threshold {similarity_threshold} for query: {query[:50]}...")
             return results
 
         except Exception as e:
@@ -550,18 +547,9 @@ class VectorStore:
                 # Lazy load model if not already loaded
                 if self._embedding_model is None:
                     try:
-                        # First try Celery cache
-                        from app.core.celery_app import get_cached_model
-                        cached_model = get_cached_model('sentence_transformers')
-                        if cached_model is not None:
-                            logger.debug("Using cached sentence-transformers model from Celery")
-                            self._embedding_model = cached_model
-                        else:
-                            logger.info("Loading sentence-transformers model on-demand...")
-                            # Load model directly if not in cache
-                            from sentence_transformers import SentenceTransformer
-                            self._embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-                            logger.info("✓ Sentence-transformers model loaded successfully")
+                        from lazy_model_loader import get_sentence_transformer
+                        self._embedding_model = get_sentence_transformer()
+                        logger.debug("Using lazy-loaded sentence-transformers model")
                     except Exception as model_error:
                         logger.error(f"Failed to load sentence-transformers model: {model_error}")
                         # Return zero vector instead of failing
@@ -585,7 +573,7 @@ class VectorStore:
                         encode_thread = threading.Thread(target=encode_text)
                         encode_thread.daemon = True
                         encode_thread.start()
-                        encode_thread.join(timeout=5.0)  # 5 second timeout
+                        encode_thread.join(timeout=settings.EMBEDDING_TIMEOUT)  # Configurable timeout
                         
                         if encode_thread.is_alive():
                             logger.warning(f"Embedding generation timed out for text: {text[:50]}...")
@@ -701,15 +689,16 @@ class VectorStore:
         Returns:
             Dictionary with store statistics
         """
+        db = self.db if self.db else SessionLocal()
         try:
             # Get total count
             count_sql = text("SELECT COUNT(*) FROM document_embeddings")
-            result = self.db.execute(count_sql)
+            result = db.execute(count_sql)
             total_count = result.scalar()
 
             # Get count by fund
             fund_sql = text("SELECT fund_id, COUNT(*) FROM document_embeddings GROUP BY fund_id")
-            result = self.db.execute(fund_sql)
+            result = db.execute(fund_sql)
             fund_counts = {row[0]: row[1] for row in result}
 
             return {
@@ -730,3 +719,6 @@ class VectorStore:
                 "embedding_dimensions": self.embedding_dimensions,
                 "error": str(e)
             }
+        finally:
+            if not self.db:  # Only close if we created the session
+                db.close()

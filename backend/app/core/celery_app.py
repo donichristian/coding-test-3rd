@@ -16,7 +16,7 @@ celery_app = Celery(
     "fund_analysis",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=["app.tasks.document_tasks"]
+    include=["app.tasks.document_tasks", "app.tasks.chat_tasks"]
 )
 
 # Configuration for production use
@@ -35,73 +35,59 @@ celery_app.conf.update(
     broker_connection_retry_on_startup = True
 )
 
-# Global model cache for Celery workers
-_model_cache = {}
-
 @worker_process_init.connect
-def preload_models_on_worker_init(sender, **kwargs):
+def initialize_lazy_model_loader(sender, **kwargs):
     """
-    Pre-load ML models when Celery worker starts.
+    Initialize lazy model loader when Celery worker starts.
 
-    This ensures models are cached in each worker process,
-    avoiding runtime downloads and improving performance.
+    This sets up the lazy loading system without pre-downloading models,
+    reducing startup time and Docker image size.
     """
     try:
-        logger.info("Pre-loading ML models in Celery worker...")
+        logger.info("Initializing lazy model loader in Celery worker...")
 
-        # Pre-load docling converter (this will cache RapidOCR models)
+        # Import lazy model loader to ensure it's available
+        import sys
+        sys.path.insert(0, '/app')
+        from lazy_model_loader import preload_critical_models
+
+        # Preload only the most critical models (optional, can be removed for maximum size reduction)
         try:
-            from docling.document_converter import DocumentConverter
-            from docling.datamodel.pipeline_options import PdfPipelineOptions
-            from docling.document_converter import PdfFormatOption
-            from docling.datamodel.base_models import InputFormat
-
-            logger.info("Loading Docling converter with intelligent OCR disabled...")
-            pipeline_options = PdfPipelineOptions()
-            pipeline_options.do_ocr = False  # DISABLED - OCR only when needed
-            pipeline_options.do_table_structure = True
-
-            _model_cache['docling_converter'] = DocumentConverter(
-                format_options={
-                    InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
-                }
-            )
-            logger.info("✓ Docling converter loaded successfully")
+            preload_critical_models()
         except Exception as e:
-            logger.warning(f"Failed to pre-load Docling converter: {e}")
+            logger.warning(f"Could not preload critical models: {e}")
 
-        # Verify RapidOCR models are cached
-        try:
-            import os
-            rapidocr_dir = "/usr/local/lib/python3.11/site-packages/rapidocr/models"
-            if os.path.exists(rapidocr_dir):
-                model_files = [
-                    "ch_PP-OCRv4_det_infer.pth",
-                    "ch_ptocr_mobile_v2.0_cls_infer.pth",
-                    "ch_PP-OCRv4_rec_infer.pth"
-                ]
-                found = sum(1 for f in model_files if os.path.exists(os.path.join(rapidocr_dir, f)))
-                logger.info(f"✓ Found {found}/{len(model_files)} RapidOCR model files cached")
-        except Exception as e:
-            logger.debug(f"Could not verify RapidOCR models: {e}")
-
-        # Pre-load sentence-transformers model
-        try:
-            from sentence_transformers import SentenceTransformer
-            logger.info("Loading sentence-transformers model...")
-            _model_cache['sentence_transformers'] = SentenceTransformer('all-MiniLM-L6-v2')
-            logger.info("✓ Sentence-transformers model loaded successfully")
-        except Exception as e:
-            logger.warning(f"Failed to pre-load sentence-transformers model: {e}")
-
-        logger.info("✓ Model pre-loading complete in Celery worker")
+        logger.info("✓ Lazy model loader initialized in Celery worker")
 
     except Exception as e:
-        logger.error(f"Failed to pre-load models in worker: {e}")
+        logger.error(f"Failed to initialize lazy model loader: {e}")
 
 def get_cached_model(model_name: str):
-    """Get a cached model instance."""
-    return _model_cache.get(model_name)
+    """Get a cached model instance using lazy loading."""
+    import sys
+    sys.path.insert(0, '/app')
+    from lazy_model_loader import (
+        get_docling_converter,
+        get_sentence_transformer,
+        get_openai_client,
+        get_gemini_client
+    )
+
+    try:
+        if model_name == 'docling_converter':
+            return get_docling_converter()
+        elif model_name == 'sentence_transformers':
+            return get_sentence_transformer()
+        elif model_name == 'openai_client':
+            return get_openai_client()
+        elif model_name == 'gemini_client':
+            return get_gemini_client()
+        else:
+            logger.warning(f"Unknown model name: {model_name}")
+            return None
+    except Exception as e:
+        logger.error(f"Failed to get cached model {model_name}: {e}")
+        return None
 
 # For development - allows running celery from command line
 if __name__ == "__main__":

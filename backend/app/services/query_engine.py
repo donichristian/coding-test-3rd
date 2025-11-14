@@ -74,4 +74,35 @@ class QueryEngine:
                 result["metrics"] = None
 
         return result
+
+    def process_query_sync(
+        self,
+        query: str,
+        fund_id: Optional[int] = None,
+        document_id: Optional[int] = None,
+        conversation_history: Optional[List[Dict[str, str]]] = None
+    ) -> Dict[str, Any]:
+        """
+        Synchronous version of process_query for Celery tasks
+
+        Args:
+            query: User question
+            fund_id: Optional fund ID for context
+            document_id: Optional document ID (deprecated, use fund_id)
+            conversation_history: Previous conversation messages for context
+
+        Returns:
+            Response with answer, sources, and metrics
+        """
+        import asyncio
+
+        # Create new event loop for synchronous context
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(
+                self.process_query(query, fund_id, document_id, conversation_history)
+            )
+        finally:
+            loop.close()
     

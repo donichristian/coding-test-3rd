@@ -1,0 +1,5 @@
+# Backend API specific dependencies (lightweight)
+-r requirements-common.txt
+
+# Additional API-only dependencies
+# (most dependencies are already in common)

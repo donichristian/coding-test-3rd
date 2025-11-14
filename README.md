@@ -69,7 +69,7 @@ This repository contains a **project scaffold** to help you get started quickly:
 The following **core functionalities are NOT implemented** and need to be built by you:
 
 #### 1. Document Processing Pipeline (Phase 2) - **CRITICAL**
-- [ ] PDF parsing with Docling and pdfplumber fallback
+- [ ] PDF parsing with pdfplumber (integrate and test)
 - [ ] Table detection and extraction logic
 - [ ] Intelligent table classification (capital calls vs distributions vs adjustments)
 - [ ] Data validation and cleaning
@@ -77,8 +77,8 @@ The following **core functionalities are NOT implemented** and need to be built 
 - [ ] Background task processing (Celery integration)
 
 **Files implemented:**
-- `backend/app/services/document_processor.py` - Document processing with Docling
-- `backend/app/services/table_parser.py` - Table extraction and classification
+- `backend/app/services/document_processor.py` (skeleton provided)
+- `backend/app/services/table_parser.py` (needs implementation)
 
 #### 2. Vector Store & RAG System (Phase 3) - **CRITICAL**
 - [ ] Text chunking strategy implementation
@@ -293,7 +293,7 @@ CREATE TABLE documents (
 - Docker & Docker Compose
 - Node.js 18+ (for local frontend development)
 - Python 3.11+ (for local backend development)
-- OpenAI API key (or use free alternatives - see below)
+- GEMINI_API_KEY (primary) or OPENAI_API_KEY (fallback) - see Free LLM Options below
 
 ### Quick Start
 
@@ -309,34 +309,124 @@ cd fund-analysis-system
 cp .env.example .env
 
 # Edit .env and add your API keys
-# OPENAI_API_KEY=sk-...
+# The project primarily uses GEMINI_API_KEY for LLM services, with OPENAI_API_KEY as fallback
+# GEMINI_API_KEY=...
+# OPENAI_API_KEY=... (optional, used as fallback)
 # DATABASE_URL=postgresql://user:password@localhost:5432/funddb
 ```
 
-3. **Choose your development approach**
+3. **Start with Docker Compose**
 
-**Note**: The first build will take longer as it pre-downloads OCR and ML models (RapidOCR, Docling, sentence-transformers) during the Docker build process. This ensures fast document processing without runtime model downloads.
+**Note**: The first build will take longer as it pre-downloads OCR and ML models during the Docker build process. The `preload_models.py` script initializes and caches:
 
-#### Development (Fast iteration, bind mounts)
+- **Docling models** for document parsing and table extraction
+- **RapidOCR models** (3 OCR model files) for optical character recognition
+- **Sentence-transformers** `all-MiniLM-L6-v2` model for local embeddings
+
+This ensures fast document processing without runtime model downloads.
+
+#### Makefile Commands:
 ```bash
 # Build development images (includes model pre-loading)
-make dev-build
+make build
 
 # Start development services with hot reload
-make dev
+make up
 
-# Or manually:
-docker-compose --profile dev up -d
+# Or:
+docker-compose up -d
+
+# Main commands
+make help             # Show all available commands
+make up               # Start all services
+make down             # Stop all services
+make build            # Build all images
+make logs             # Show logs for all services
+
+# Service-specific logs
+make logs-backend     # Show backend logs
+make logs-frontend    # Show frontend logs
+make logs-postgres    # Show PostgreSQL logs
+make logs-redis       # Show Redis logs
+make logs-celery      # Show Celery worker logs
+
+# Service management
+make status           # Show status of all containers
+make restart          # Restart all services
+make restart-backend  # Restart backend service
+make restart-frontend # Restart frontend service
+make restart-celery   # Restart Celery worker service
+
+# Database operations
+make init-db          # Initialize database
+make db-shell         # Connect to PostgreSQL shell
+make backup-db        # Backup database to file
+make restore-db FILE=backup.sql  # Restore database from backup
+make reset-db-data    # Clear all database data (keeps tables)
+
+# Shell access
+make backend-shell    # Open shell in backend container
+make frontend-shell   # Open shell in frontend container
+
+# Testing
+make test             # Run all tests
+make test-backend     # Run backend tests
+make test-backend-file FILE=test_file.py  # Run specific backend test file
+make test-query-engine    # Run query engine tests
+make test-document-processor  # Run document processor tests
+make test-frontend    # Run frontend tests
+
+# Health checks
+make health           # Check service health
+
+# Cleanup
+make clean            # Stop all services and clean containers
+make clean-images     # Remove unused images
+make clean-volumes    # Remove unused volumes (WARNING: destroys data)
+
+# Setup
+make setup            # Initial project setup
+make docs             # Open API documentation
+make info             # Show environment information
+
 ```
 
-#### Production (Optimized builds, new images)
-```bash
-# Build and deploy production images (includes model pre-loading)
-make prod-deploy
+### Windows Users
 
-# Or manually:
-docker-compose --profile prod up -d
+If you're on Windows, you can use the Makefile commands in several ways:
+
+#### Option 1: Git Bash (Recommended)
+Install [Git for Windows](https://gitforwindows.org/) which includes Git Bash, then run the `make` commands as shown above.
+
+#### Option 2: Windows Subsystem for Linux (WSL)
+Install WSL and run the commands in a Linux environment.
+
+#### Option 3: Use Docker Compose Directly
+Instead of `make` commands, you can use `docker-compose` directly:
+
+```powershell
+# Build images
+docker-compose build
+
+# Start services
+docker-compose up -d
+
+# View logs
+docker-compose logs
+
+# Stop services
+docker-compose down
+
+# Run tests
+docker-compose exec backend pytest tests/ -v
 ```
+
+#### Option 4: PowerShell with Make
+If you have Make installed for Windows, you can run the commands directly in PowerShell.
+
+**Note**: The Makefile uses Unix-style commands. For full compatibility, Git Bash or WSL is recommended.
+
+---
 
 4. **Access the application**
 - Frontend: http://localhost:3000
@@ -353,56 +443,6 @@ docker-compose --profile prod up -d
 - Go to http://localhost:3000/chat
 - Try: "What is DPI?"
 - Try: "Calculate the current DPI for this fund"
-
-### Development vs Production
-
-| Feature | Development | Production |
-|---------|-------------|------------|
-| **Image Building** | Cached layers, faster rebuilds | Clean builds, cache-busting |
-| **Code Changes** | Hot reload via bind mounts | Requires image rebuild |
-| **Dependencies** | Lockfile ignored for speed | Lockfile enforced for reproducibility |
-| **Performance** | Development optimizations | Production optimizations |
-| **Security** | Root user allowed | Non-root user enforced |
-| **Caching** | Aggressive caching | Minimal caching for consistency |
-| **Model Pre-loading** | Models pre-downloaded during build | Models pre-downloaded during build |
-
-#### When to use Development:
-- Active development and debugging
-- Frequent code changes
-- Testing new features
-- Local development workflow
-
-#### When to use Production:
-- Demo deployments
-- Staging environments
-- CI/CD pipelines
-- Performance testing
-- Production deployments
-
-#### Makefile Commands:
-```bash
-# Development
-make dev              # Start dev environment
-make dev-build        # Build dev images
-make dev-up           # Start dev services
-make dev-down         # Stop dev services
-
-# Production
-make prod             # Start prod environment
-make prod-build       # Build prod images (--no-cache)
-make prod-up          # Start prod services
-make prod-deploy      # Build + deploy prod
-
-# Tagging & Deployment
-make tag-prod TAG=v1.0.0    # Tag images with version
-make push-prod TAG=v1.0.0   # Push tagged images
-
-# Cleanup
-make clean             # Stop all services
-make clean-images      # Remove unused images
-make clean-volumes     # Remove unused volumes
-make clean-all         # Complete cleanup
-```
 
 ---
 
@@ -701,13 +741,13 @@ curl -X POST "http://localhost:8000/api/chat/query" \
 
 ### Backend
 - **Framework**: FastAPI (Python 3.11+)
-- **Document Parser**: Docling
+- **Document Parser**: Docling (primary) with pdfplumber fallback
 - **Vector DB**: pgvector (PostgreSQL extension)
 - **SQL DB**: PostgreSQL 15+
 - **ORM**: SQLAlchemy
 - **LLM Framework**: LangChain
-- **LLM**: OpenAI GPT-4 or any LLM
-- **Embeddings**: OpenAI text-embedding-3-small
+- **LLM**: Google Gemini 2.5 Flash (primary) with OpenAI GPT-4 fallback
+- **Embeddings**: sentence-transformers all-MiniLM-L6-v2 (primary, local) with gemini-embedding-001 and OpenAI text-embedding-3-small fallbacks
 - **Task Queue**: Celery + Redis
 
 ### Frontend
@@ -725,13 +765,6 @@ curl -X POST "http://localhost:8000/api/chat/query" \
 ---
 
 ## Troubleshooting
-
-### Model Download Issues
-**Problem**: Document processing is slow on first upload
-**Solution**: 
-- Ensure models were pre-loaded during Docker build (check build logs for "Model pre-loading complete")
-- Rebuild the Docker image: `make dev-build` or `make prod-build`
-- Models are cached in the Docker image, so subsequent uploads should be fast
 
 ### Document Parsing Issues
 **Problem**: Docling can't extract tables
@@ -761,14 +794,6 @@ curl -X POST "http://localhost:8000/api/chat/query" \
 - Add CORS middleware in FastAPI
 - Allow origin: http://localhost:3000
 - Check network configuration in Docker
-
-### Slow Document Processing
-**Problem**: Document upload takes too long (>30 seconds)
-**Solution**:
-- Verify models were pre-loaded: Check Docker build logs for "Model pre-loading complete"
-- Rebuild images if models weren't pre-loaded: `make dev-build` or `make prod-build`
-- Check network connectivity (models download from external sources during build)
-- Processing should be fast (2-5 seconds) once models are cached
 
 ---
 

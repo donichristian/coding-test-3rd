@@ -35,7 +35,7 @@ services:
   backend:
     build:
       context: ./backend
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.backend
     container_name: fund-backend
     ports:
       - "8000:8000"
@@ -65,7 +65,7 @@ services:
   celery_worker:
     build:
       context: ./backend
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.celery
     container_name: fund-celery-worker
     command: celery -A app.core.celery_app worker --loglevel=info --concurrency=2
     environment:
@@ -101,7 +101,9 @@ services:
       - /app/.next
     depends_on:
       - backend
-    command: npm run dev
+    # Override Dockerfile user for development (needs write access to mounted volumes)
+    user: root
+    command: sh -c "npm install && npm run dev"
 
 volumes:
   postgres_data:

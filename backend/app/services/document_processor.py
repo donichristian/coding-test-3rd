@@ -179,37 +179,41 @@ class DoclingDocumentProcessor:
             converter: Docling DocumentConverter instance (uses cached version if available)
             db_session: SQLAlchemy session for database operations
         """
+        from app.services.table_parser import TableParser
+        import json
+        
         self.converter = converter or self._get_cached_converter()
         self.db_session = db_session
+        self.table_parser = TableParser()
         self.data_parser = DataParser()
         self.vector_store = VectorStore(db=db_session)
+        self._text_serialization_formats = ["markdown", "text", "html", "json"]
 
     def _get_cached_converter(self) -> DocumentConverter:
         """
-        Get cached Docling converter from Celery if available.
-        
+        Get Docling converter using lazy loading.
+
         Returns:
             DocumentConverter instance
         """
         try:
-            from app.core.celery_app import get_cached_model
-            cached_converter = get_cached_model('docling_converter')
-            if cached_converter is not None:
-                logger.info("Using cached Docling converter (OCR disabled)")
-                return cached_converter
-        except (ImportError, Exception):
-            pass  # Not in Celery context or cache miss
+            from lazy_model_loader import get_docling_converter
+            converter = get_docling_converter()
+            logger.info("Using lazy-loaded Docling converter (OCR disabled)")
+            return converter
+        except Exception as e:
+            logger.warning(f"Could not get lazy-loaded converter, creating new one: {e}")
 
         # Fallback to creating a new converter without OCR
         logger.info("Creating new Docling converter (OCR disabled for performance)")
         from docling.datamodel.pipeline_options import PdfPipelineOptions
         from docling.document_converter import PdfFormatOption
         from docling.datamodel.base_models import InputFormat
-        
+
         pipeline_options = PdfPipelineOptions()
         pipeline_options.do_ocr = False  # Performance optimization
         pipeline_options.do_table_structure = True
-        
+
         return DocumentConverter(
             format_options={
                 InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
@@ -309,27 +313,56 @@ class DoclingDocumentProcessor:
 
     def _extract_text_content(self, doc) -> List[Dict[str, Any]]:
         """
-        Extract text content using Docling's native document model.
+        Extract text content using Docling's multiple native serialization formats.
         
         Args:
             doc: Docling Document object
             
         Returns:
-            List of text content items with Docling metadata
+            List of text content items with comprehensive Docling metadata
         """
         try:
-            # Use Docling's export to markdown for structured text
-            markdown_content = doc.export_to_markdown()
+            # Extract using multiple Docling native export formats
+            text_formats = {}
+            for format_name in self._text_serialization_formats:
+                try:
+                    if format_name == "markdown":
+                        text_formats["markdown"] = doc.export_to_markdown()
+                    elif format_name == "text":
+                        text_formats["text"] = doc.export_to_text()
+                    elif format_name == "html":
+                        text_formats["html"] = doc.export_to_html()
+                    elif format_name == "json":
+                        text_formats["json"] = json.dumps(doc.export_to_dict(), indent=2)
+                except Exception as format_error:
+                    logger.warning(f"Failed to export {format_name}: {format_error}")
+                    text_formats[format_name] = ""
+
+            # Extract comprehensive document metadata
+            doc_metadata = self._extract_docling_document_metadata(doc)
             
-            return [{
+            # Create content items for each format
+            content_items = []
+            for format_name, content in text_formats.items():
+                if content:  # Only include non-empty formats
+                    content_items.append({
+                        "page": 1,
+                        "content": content,
+                        "type": f"{format_name}_text",
+                        "format": format_name,
+                        "metadata": {
+                            **doc_metadata,
+                            "extraction_method": f"docling_{format_name}_export",
+                            "format_length": len(content),
+                            "available_formats": list(text_formats.keys())
+                        }
+                    })
+
+            return content_items if content_items else [{
                 "page": 1,
-                "content": markdown_content,
-                "type": "markdown_text",
-                "metadata": {
-                    "document_structure": getattr(doc, 'content_items', []),
-                    "total_text_length": len(markdown_content),
-                    "extraction_method": "docling_markdown_export"
-                }
+                "content": "Text extraction failed",
+                "type": "error",
+                "metadata": {"error": "All text extraction formats failed"}
             }]
             
         except Exception as e:
@@ -341,9 +374,76 @@ class DoclingDocumentProcessor:
                 "metadata": {"error": str(e)}
             }]
 
+    def _extract_docling_document_metadata(self, doc) -> Dict[str, Any]:
+        """
+        Extract comprehensive metadata from Docling document structure.
+        
+        Args:
+            doc: Docling Document object
+            
+        Returns:
+            Dictionary with detailed document metadata
+        """
+        metadata = {
+            "page_count": 0,
+            "section_count": 0,
+            "has_tables": False,
+            "has_images": False,
+            "document_structure": [],
+            "paragraph_count": 0,
+            "table_count": 0,
+            "picture_count": 0
+        }
+
+        try:
+            # Basic document properties
+            if hasattr(doc, 'pages'):
+                metadata["page_count"] = len(doc.pages)
+            
+            # Check for tables and images
+            if hasattr(doc, 'tables') and doc.tables:
+                metadata["has_tables"] = True
+                metadata["table_count"] = len(doc.tables)
+                
+            if hasattr(doc, 'pictures') and doc.pictures:
+                metadata["has_images"] = True
+                metadata["picture_count"] = len(doc.pictures)
+
+            # Extract content items for structure analysis
+            if hasattr(doc, 'content_items'):
+                content_items = doc.content_items or []
+                metadata["document_structure"] = [
+                    {
+                        "type": getattr(item, 'type', 'unknown'),
+                        "level": getattr(item, 'level', 0),
+                        "text": str(getattr(item, 'text', ''))[:100],
+                        "page": getattr(item, 'page', 1)
+                    }
+                    for item in content_items
+                    if hasattr(item, 'text')
+                ]
+                
+                # Count sections and paragraphs
+                sections = [
+                    item for item in content_items
+                    if hasattr(item, 'type') and item.type in ['title', 'heading']
+                ]
+                metadata["section_count"] = len(sections)
+                
+                paragraphs = [
+                    item for item in content_items
+                    if hasattr(item, 'type') and item.type in ['paragraph', 'text']
+                ]
+                metadata["paragraph_count"] = len(paragraphs)
+
+        except Exception as e:
+            logger.warning(f"Metadata extraction failed: {e}")
+
+        return metadata
+
     def _extract_tables_with_docling(self, doc) -> Dict[str, Any]:
         """
-        Extract tables using Docling's native table structure recognition.
+        Extract tables using the TableParser service.
         
         Args:
             doc: Docling Document object
@@ -351,202 +451,290 @@ class DoclingDocumentProcessor:
         Returns:
             Dictionary with classified tables and Docling metadata
         """
-        try:
-            tables_data = {
-                "capital_calls": [],
-                "distributions": [],
-                "adjustments": [],
-                "processing_method": "docling_native"
-            }
-
-            # Get tables from Docling's document model
-            if hasattr(doc, 'tables') and doc.tables:
-                logger.info(f"Found {len(doc.tables)} tables via Docling")
-                
-                for table in doc.tables:
-                    # Use Docling's built-in DataFrame export
-                    if hasattr(table, 'export_to_dataframe'):
-                        df = table.export_to_dataframe(doc=doc)
-                        if not df.empty:
-                            # Convert to records format
-                            table_records = df.to_dict('records')
-                            
-                            # Classify table using Docling's table type if available
-                            table_type = getattr(table, 'table_type', 'unknown')
-                            
-                            # Apply business logic classification
-                            classified_type = self._classify_table_for_business_logic(
-                                table_records, table_type
-                            )
-                            
-                            if classified_type:
-                                tables_data[classified_type].append({
-                                    "headers": list(df.columns),
-                                    "rows": table_records,
-                                    "metadata": {
-                                        "docling_table_type": table_type,
-                                        "confidence": getattr(table, 'confidence', 1.0),
-                                        "extraction_method": "docling_dataframe",
-                                        "page_number": getattr(table, 'page_number', 1)
-                                    }
-                                })
-
-            logger.info(f"Extracted tables: {sum(len(v) for k, v in tables_data.items() if k != 'processing_method')}")
-            return tables_data
-
-        except Exception as e:
-            logger.error(f"Table extraction failed: {e}")
-            return {
-                "capital_calls": [],
-                "distributions": [],
-                "adjustments": [],
-                "processing_method": "error",
-                "error": str(e)
-            }
-
-    def _classify_table_for_business_logic(
-        self, 
-        table_records: List[Dict[str, Any]], 
-        docling_table_type: str
-    ) -> Optional[str]:
-        """
-        Classify table type for business logic using Docling insights.
-        
-        Args:
-            table_records: Table data as list of records
-            docling_table_type: Docling's table classification
-            
-        Returns:
-            Business logic table type or None
-        """
-        if not table_records:
-            return None
-
-        # Use Docling's table type as primary indicator
-        if docling_table_type and docling_table_type != 'unknown':
-            if 'capital' in docling_table_type.lower() or 'call' in docling_table_type.lower():
-                return "capital_calls"
-            elif 'distribution' in docling_table_type.lower() or 'return' in docling_table_type.lower():
-                return "distributions"
-            elif 'fee' in docling_table_type.lower() or 'expense' in docling_table_type.lower():
-                return "adjustments"
-
-        # Fallback to content-based classification
-        headers = list(table_records[0].keys()) if table_records else []
-        headers_text = " ".join(headers).lower()
-        
-        # Enhanced classification using business keywords
-        if any(keyword in headers_text for keyword in ["call", "capital", "commitment"]):
-            return "capital_calls"
-        elif any(keyword in headers_text for keyword in ["distribution", "return", "dividend"]):
-            return "distributions"
-        elif any(keyword in headers_text for keyword in ["fee", "expense", "adjustment"]):
-            return "adjustments"
-            
-        return None
+        return self.table_parser.extract_tables_with_docling(doc)
 
     async def _create_chunks_with_docling(
-        self, 
-        text_content: List[Dict[str, Any]], 
-        document_id: int, 
+        self,
+        text_content: List[Dict[str, Any]],
+        document_id: int,
         fund_id: int
     ) -> List[Dict[str, Any]]:
         """
-        Create text chunks using structured approach based on Docling content.
+        Create text chunks using Docling's native document structure awareness.
         
         Args:
-            text_content: Extracted text content
+            text_content: Extracted text content from Docling
             document_id: Database document ID
             fund_id: Associated fund ID
             
         Returns:
-            List of text chunks with Docling metadata
+            List of text chunks with Docling structure metadata
         """
         try:
-            # Process each text content item using structured approach
+            # Use Docling's document structure for intelligent chunking
             all_chunks = []
+            
+            # Process each format (prefer markdown for structure)
             for content_item in text_content:
                 content = content_item["content"]
                 metadata = content_item["metadata"]
+                format_type = content_item.get("format", "unknown")
                 
-                # Create chunks based on document sections
-                chunks = self._create_structured_chunks(content, metadata, document_id, fund_id)
+                # Use adaptive chunking strategy based on content structure
+                if metadata.get("section_count", 0) > 2:
+                    # Use structure-based chunking for well-structured documents
+                    chunks = self._create_docling_structure_chunks(
+                        content, metadata, document_id, fund_id, format_type
+                    )
+                else:
+                    # Use semantic chunking for less structured content
+                    chunks = self._create_semantic_chunks_with_docling(
+                        content, metadata, document_id, fund_id, format_type
+                    )
+                
                 all_chunks.extend(chunks)
             
-            logger.info(f"Created {len(all_chunks)} chunks using Docling's structured approach")
+            # Sort chunks by page and chunk index for consistent ordering
+            all_chunks.sort(key=lambda x: (x["metadata"].get("page_number", 1), x["metadata"].get("chunk_index", 0)))
+            
+            logger.info(f"Created {len(all_chunks)} chunks using Docling's structure-aware approach")
             return all_chunks
 
         except Exception as e:
-            logger.error(f"Chunking failed: {e}")
+            logger.error(f"Docling chunking failed: {e}")
             # Fallback to simple chunking
             return self._fallback_chunking(text_content, document_id, fund_id)
 
-    def _create_structured_chunks(
-        self, 
-        content: str, 
-        metadata: Dict[str, Any], 
-        document_id: int, 
-        fund_id: int
+    def _create_docling_structure_chunks(
+        self,
+        content: str,
+        metadata: Dict[str, Any],
+        document_id: int,
+        fund_id: int,
+        format_type: str
     ) -> List[Dict[str, Any]]:
         """
-        Create structured chunks based on document hierarchy.
+        Create chunks based on Docling's document structure hierarchy.
         
         Args:
-            content: Text content
-            metadata: Document metadata
+            content: Text content in specified format
+            metadata: Docling document metadata
             document_id: Database document ID
             fund_id: Associated fund ID
+            format_type: Text format (markdown, text, etc.)
             
         Returns:
-            List of structured chunks
+            List of chunks with Docling structure metadata
         """
         import re
         
         chunks = []
         
-        # Split content into sections based on headings
-        sections = re.split(r'\n#{1,3}\s+', content)
-        
-        for i, section in enumerate(sections):
-            if section.strip():
-                chunk = {
-                    "content": section.strip(),
-                    "metadata": {
-                        **metadata,
-                        "document_id": document_id,
-                        "fund_id": fund_id,
-                        "chunk_index": i,
-                        "chunk_type": "section",
-                        "chunking_method": "docling_structured",
-                        "content_length": len(section),
-                        "word_count": len(section.split())
-                    }
-                }
-                chunks.append(chunk)
-        
-        # If no sections found, create chunks of fixed size
-        if not chunks and content:
-            chunk_size = settings.CHUNK_SIZE
-            overlap = settings.CHUNK_OVERLAP
+        if format_type == "markdown":
+            # Use markdown headers for natural structure
+            import re
             
-            for i in range(0, len(content), chunk_size - overlap):
-                chunk_content = content[i:i + chunk_size].strip()
-                if chunk_content:
-                    chunk = {
-                        "content": chunk_content,
-                        "metadata": {
-                            **metadata,
-                            "document_id": document_id,
-                            "fund_id": fund_id,
-                            "chunk_index": len(chunks),
-                            "chunk_type": "fixed_size",
-                            "chunking_method": "docling_fallback",
-                            "content_length": len(chunk_content),
-                            "word_count": len(chunk_content.split())
-                        }
-                    }
+            # Split by markdown headings while preserving structure
+            lines = content.split('\n')
+            current_section = []
+            chunk_index = 0
+            
+            for line in lines:
+                # Check if line is a heading
+                if line.strip().startswith('#'):
+                    # Save previous section
+                    if current_section:
+                        section_text = '\n'.join(current_section).strip()
+                        if section_text:
+                            chunk = self._create_enhanced_chunk(
+                                section_text, "section", metadata, document_id, fund_id, chunk_index
+                            )
+                            chunks.append(chunk)
+                            chunk_index += 1
+                    
+                    current_section = [line]  # Start new section with heading
+                else:
+                    current_section.append(line)
+            
+            # Add final section
+            if current_section:
+                section_text = '\n'.join(current_section).strip()
+                if section_text:
+                    chunk = self._create_enhanced_chunk(
+                        section_text, "section", metadata, document_id, fund_id, chunk_index
+                    )
                     chunks.append(chunk)
         
+        else:
+            # For non-markdown formats, use paragraph-based approach
+            chunks = self._create_paragraph_chunks_with_docling(
+                content, metadata, document_id, fund_id
+            )
+        
+        return chunks
+
+    def _create_enhanced_chunk(
+        self,
+        content: str,
+        chunk_type: str,
+        metadata: Dict[str, Any],
+        document_id: int,
+        fund_id: int,
+        chunk_index: int = None
+    ) -> Dict[str, Any]:
+        """
+        Create an enhanced chunk with Docling-specific metadata.
+        
+        Args:
+            content: Chunk text content
+            chunk_type: Type of chunk (section, semantic, paragraph)
+            metadata: Docling document metadata
+            document_id: Database document ID
+            fund_id: Associated fund ID
+            chunk_index: Optional chunk index
+            
+        Returns:
+            Dictionary representing an enhanced text chunk
+        """
+        if chunk_index is None:
+            chunk_index = 0
+            
+        # Calculate word count and other metrics
+        words = content.split()
+        char_count = len(content)
+        
+        return {
+            "content": content,
+            "metadata": {
+                **metadata,
+                "document_id": document_id,
+                "fund_id": fund_id,
+                "chunk_index": chunk_index,
+                "chunk_type": chunk_type,
+                "chunking_method": "docling_enhanced",
+                "content_length": char_count,
+                "word_count": len(words),
+                "has_structure": chunk_type == "section",
+                "processing_method": "docling_native_enhanced"
+            }
+        }
+
+    def _create_paragraph_chunks_with_docling(
+        self,
+        content: str,
+        metadata: Dict[str, Any],
+        document_id: int,
+        fund_id: int
+    ) -> List[Dict[str, Any]]:
+        """
+        Create chunks based on paragraphs using Docling structure analysis.
+        
+        Args:
+            content: Text content
+            metadata: Docling document metadata
+            document_id: Database document ID
+            fund_id: Associated fund ID
+            
+        Returns:
+            List of paragraph-based chunks
+        """
+        import re
+        
+        # Split by paragraphs (double newlines or single newlines with proper spacing)
+        paragraphs = re.split(r'\n\s*\n', content)
+        chunks = []
+        chunk_index = 0
+        
+        for paragraph in paragraphs:
+            if paragraph.strip():
+                chunk = self._create_enhanced_chunk(
+                    paragraph.strip(), "paragraph", metadata, document_id, fund_id, chunk_index
+                )
+                chunks.append(chunk)
+                chunk_index += 1
+        
+        return chunks
+
+    def _create_semantic_chunks_with_docling(
+        self,
+        content: str,
+        metadata: Dict[str, Any],
+        document_id: int,
+        fund_id: int,
+        format_type: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Create semantically-aware chunks using Docling content analysis.
+        
+        Args:
+            content: Text content
+            metadata: Docling document metadata
+            document_id: Database document ID
+            fund_id: Associated fund ID
+            format_type: Text format
+            
+        Returns:
+            List of semantic chunks with Docling metadata
+        """
+        import re
+        
+        chunks = []
+        sentences = re.split(r'(?<=[.!?])\s+', content)
+        
+        current_chunk = ""
+        chunk_index = 0
+        
+        # Check if content has clear semantic boundaries
+        paragraph_count = metadata.get("paragraph_count", 0)
+        use_paragraphs = paragraph_count > 5
+        
+        if use_paragraphs:
+            # Split by paragraphs for better semantic boundaries
+            paragraphs = re.split(r'\n\s*\n', content)
+            for paragraph in paragraphs:
+                if paragraph.strip():
+                    if len(current_chunk) + len(paragraph) > settings.CHUNK_SIZE and current_chunk:
+                        chunk = self._create_enhanced_chunk(
+                            current_chunk.strip(), "semantic", metadata, document_id, fund_id, chunk_index
+                        )
+                        chunks.append(chunk)
+                        
+                        # Start new chunk
+                        current_chunk = paragraph
+                        chunk_index += 1
+                    else:
+                        if current_chunk:
+                            current_chunk += "\n\n" + paragraph
+                        else:
+                            current_chunk = paragraph
+        else:
+            # Use sentence-based chunking
+            for sentence in sentences:
+                if not sentence.strip():
+                    continue
+                    
+                potential_chunk = current_chunk + (" " if current_chunk else "") + sentence
+                
+                if len(potential_chunk) > settings.CHUNK_SIZE and current_chunk:
+                    chunk = self._create_enhanced_chunk(
+                        current_chunk.strip(), "semantic", metadata, document_id, fund_id, chunk_index
+                    )
+                    chunks.append(chunk)
+                    
+                    # Start new chunk with overlap
+                    overlap_words = current_chunk.split()[-settings.CHUNK_OVERLAP//4:]
+                    current_chunk = " ".join(overlap_words) + " " + sentence if overlap_words else sentence
+                    chunk_index += 1
+                else:
+                    current_chunk = potential_chunk
+        
+        # Add final chunk
+        if current_chunk.strip():
+            chunk = self._create_enhanced_chunk(
+                current_chunk.strip(), "semantic", metadata, document_id, fund_id, chunk_index
+            )
+            chunks.append(chunk)
+            
         return chunks
 
     def _fallback_chunking(
@@ -694,51 +882,84 @@ class DoclingDocumentProcessor:
             Transaction object or None if creation fails
         """
         try:
+            # Debug logging for row data
+            logger.debug(f"Creating {table_type} object from row: {row}")
+            
             if table_type == "capital_calls":
-                call_date = self.data_parser.parse_date(row.get("date") or row.get("Date"))
-                amount = self.data_parser.parse_amount(row.get("amount") or row.get("Amount") or row.get("Called"))
+                call_date = self.data_parser.parse_date(
+                    row.get("date") or row.get("Date") or row.get("Call Date")
+                )
+                amount = self.data_parser.parse_amount(
+                    row.get("amount") or row.get("Amount") or row.get("Called") or row.get("Call Amount")
+                )
+                call_number = row.get("call number") or row.get("Call Number") or row.get("call_number")
+                description = row.get("description") or row.get("Description") or ""
 
                 if call_date and amount is not None:
+                    # Use call number as part of description if available
+                    if call_number and not description:
+                        description = call_number
+                    elif call_number and description:
+                        description = f"{call_number}: {description}"
+                    
+                    logger.debug(f"Created CapitalCall: date={call_date}, amount={amount}, desc={description}")
                     return CapitalCall(
                         fund_id=fund_id,
                         call_date=call_date,
                         amount=amount,
                         call_type=row.get("type") or row.get("Type") or "Regular",
-                        description=row.get("description") or row.get("Description") or ""
+                        description=description
                     )
 
             elif table_type == "distributions":
-                distribution_date = self.data_parser.parse_date(row.get("date") or row.get("Date"))
-                amount = self.data_parser.parse_amount(row.get("amount") or row.get("Amount") or row.get("Distributed"))
-                is_recallable = self.data_parser.parse_boolean(row.get("recallable") or row.get("Recallable"))
+                distribution_date = self.data_parser.parse_date(
+                    row.get("date") or row.get("Date") or row.get("Distribution Date")
+                )
+                amount = self.data_parser.parse_amount(
+                    row.get("amount") or row.get("Amount") or row.get("Distributed") or row.get("Distribution Amount")
+                )
+                is_recallable = self.data_parser.parse_boolean(
+                    row.get("recallable") or row.get("Recallable") or row.get("is_recallable")
+                )
+                distribution_type = row.get("type") or row.get("Type") or row.get("Distribution Type") or "Return"
+                description = row.get("description") or row.get("Description") or ""
 
                 if distribution_date and amount is not None:
+                    logger.debug(f"Created Distribution: date={distribution_date}, amount={amount}, type={distribution_type}, recallable={is_recallable}")
                     return Distribution(
                         fund_id=fund_id,
                         distribution_date=distribution_date,
                         amount=amount,
-                        distribution_type=row.get("type") or row.get("Type") or "Return",
+                        distribution_type=distribution_type,
                         is_recallable=is_recallable,
-                        description=row.get("description") or row.get("Description") or ""
+                        description=description
                     )
 
             elif table_type == "adjustments":
-                adjustment_date = self.data_parser.parse_date(row.get("date") or row.get("Date"))
-                amount = self.data_parser.parse_amount(row.get("amount") or row.get("Amount") or row.get("Adjustment"))
+                adjustment_date = self.data_parser.parse_date(
+                    row.get("date") or row.get("Date") or row.get("Adjustment Date")
+                )
+                amount = self.data_parser.parse_amount(
+                    row.get("amount") or row.get("Amount") or row.get("Adjustment") or row.get("Adjustment Amount")
+                )
+                adjustment_type = row.get("type") or row.get("Type") or row.get("Adjustment Type") or "Fee"
+                category = row.get("category") or row.get("Category") or "General"
+                description = row.get("description") or row.get("Description") or ""
 
                 if adjustment_date and amount is not None:
+                    logger.debug(f"Created Adjustment: date={adjustment_date}, amount={amount}, type={adjustment_type}")
                     return Adjustment(
                         fund_id=fund_id,
                         adjustment_date=adjustment_date,
                         amount=amount,
-                        adjustment_type=row.get("type") or row.get("Type") or "Fee",
-                        category=row.get("category") or row.get("Category") or "General",
+                        adjustment_type=adjustment_type,
+                        category=category,
                         is_contribution_adjustment=amount < 0,
-                        description=row.get("description") or row.get("Description") or ""
+                        description=description
                     )
 
         except Exception as e:
-            logger.warning(f"Failed to create object for {table_type}: {e}")
+            logger.warning(f"Failed to create object for {table_type}: {e}", exc_info=True)
 
         return None
 

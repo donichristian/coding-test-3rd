@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = os.environ.get('GEMINI_API_KEY')
     GEMINI_MODEL: str = "gemini-2.5-flash"
 
+    # Default Embedding Model (used by Docling and other components)
+    EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"
+
     # Anthropic (optional)
     ANTHROPIC_API_KEY: str = ""
 
@@ -58,6 +61,11 @@ class Settings(BaseSettings):
     # Document Processing
     CHUNK_SIZE: int = 1000
     CHUNK_OVERLAP: int = 200
+
+    # Vector Store
+    BATCH_SIZE: int = 10
+    EMBEDDING_TIMEOUT: float = 5.0
+    SIMILARITY_SEARCH_MULTIPLIER: int = 2
 
     # RAG
     TOP_K_RESULTS: int = 5

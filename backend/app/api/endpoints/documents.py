@@ -16,8 +16,8 @@ from app.schemas.document import (
     DocumentStatus
 )
 from app.core.config import settings
-from app.tasks.document_tasks import process_document_task
 from sqlalchemy import text
+from app.core.celery_app import celery_app
 
 router = APIRouter()
 
@@ -68,8 +68,11 @@ async def upload_document(
     db.commit()
     db.refresh(document)
 
-    # Start background processing with Celery
-    task = process_document_task.delay(document.id, file_path, fund_id or 1)  # Default fund_id if not provided
+    # Start background processing with Celery (using send_task to avoid importing ML dependencies)
+    task = celery_app.send_task(
+        'app.tasks.document_tasks.process_document_task',
+        args=[document.id, file_path, fund_id or 1]
+    )
 
     return {
         "document_id": document.id,

@@ -68,7 +68,8 @@ class IntentClassifier:
     
     # Configuration constants
     CALCULATION_KEYWORDS = frozenset([
-        "dpi", "irr", "pic", "calculate", "compute", "what is the"
+        "dpi", "irr", "pic", "calculate", "compute", "what is the",
+        "percentage", "percent", "ratio", "how many", "what percentage"
     ])
     
     DEFINITION_KEYWORDS = frozenset([
@@ -76,28 +77,40 @@ class IntentClassifier:
     ])
     
     RETRIEVAL_KEYWORDS = frozenset([
-        "in this", "the document", "the report", "according to"
+        "in this", "the document", "the report", "according to",
+        "show me", "list", "display", "what are", "give me",
+        "all", "find", "search", "look for"
     ])
     
     def classify(self, query: str) -> QueryIntent:
         """
         Classify query intent based on keywords.
-        
+
         Args:
             query: User query string
-            
+
         Returns:
             Classified intent
         """
         query_lower = query.lower()
-        
+
+        # Check calculation keywords first
         if any(keyword in query_lower for keyword in self.CALCULATION_KEYWORDS):
+            logger.info(f"Classified as CALCULATION: '{query}' contains calculation keywords")
             return QueryIntent.CALCULATION
+
+        # Check definition keywords
         elif any(keyword in query_lower for keyword in self.DEFINITION_KEYWORDS):
+            logger.info(f"Classified as DEFINITION: '{query}' contains definition keywords")
             return QueryIntent.DEFINITION
+
+        # Check retrieval keywords
         elif any(keyword in query_lower for keyword in self.RETRIEVAL_KEYWORDS):
+            logger.info(f"Classified as RETRIEVAL: '{query}' contains retrieval keywords")
             return QueryIntent.RETRIEVAL
-        
+
+        # Default to general
+        logger.info(f"Classified as GENERAL: '{query}' doesn't match specific keywords")
         return QueryIntent.GENERAL
     
 class ContextRetriever:
@@ -111,7 +124,8 @@ class ContextRetriever:
         self,
         query: str,
         fund_id: Optional[int] = None,
-        k: int = 5
+        k: Optional[int] = None,
+        similarity_threshold: Optional[float] = None
     ) -> List[Dict[str, Any]]:
         """
         Synchronous version of retrieve for API endpoints.
@@ -119,19 +133,25 @@ class ContextRetriever:
         Args:
             query: Search query
             fund_id: Optional fund filter
-            k: Number of results
+            k: Number of results (uses config.TOP_K_RESULTS if None)
 
         Returns:
             List of relevant documents
         """
         try:
+            # Use config value if k not specified
+            if k is None:
+                k = settings.TOP_K_RESULTS
+
             filter_metadata = {"fund_id": fund_id} if fund_id else None
+            threshold = similarity_threshold if similarity_threshold is not None else settings.SIMILARITY_THRESHOLD
             results = self.vector_store.similarity_search_sync(
                 query=query,
                 k=k,
-                filter_metadata=filter_metadata
+                filter_metadata=filter_metadata,
+                similarity_threshold=threshold
             )
-            logger.info(f"Retrieved {len(results)} document chunks")
+            logger.info(f"Retrieved {len(results)} document chunks using k={k}")
             return results
         except Exception as e:
             logger.error(f"Context retrieval failed: {e}")
@@ -205,17 +225,30 @@ class ContextFormatter:
 
         # Add retrieved document chunks with clean citations
         if retrieved_docs:
+            # Sort by score to ensure most relevant chunks come first
+            sorted_docs = sorted(retrieved_docs, key=lambda x: x.get("score", 0), reverse=True)
             context_parts.append("Relevant Document Information:")
-            for i, doc in enumerate(retrieved_docs[:3], 1):  # Limit to top 3
+            for i, doc in enumerate(sorted_docs[:settings.TOP_K_RESULTS], 1):  # Use config value
                 content = doc.get("content", "").strip()
-                if content and len(content) < 1000:  # Reasonable chunk size
+                # Remove length limit to ensure table data is included
+                if content:  # Only check that content exists
                     # Create clean citation without chunk details
                     metadata = doc.get("metadata", {})
                     citation = ContextFormatter._create_clean_citation(metadata)
 
-                    context_parts.append(f"Source: {citation}")
+                    context_parts.append(f"Source {i}: {citation}")
+                    context_parts.append("Content:")
+                    # Truncate very long content but keep table data
+                    if len(content) > 3000:
+                        content = content[:3000] + "...[content truncated]"
                     context_parts.append(content)
                     context_parts.append("")
+
+                    # Debug: Check if this chunk contains capital calls
+                    if "capital calls" in content.lower():
+                        logger.info(f"✓ Source {i} contains capital calls data")
+                    else:
+                        logger.debug(f"Source {i} does not contain capital calls")
 
         return "\n".join(context_parts)
 
@@ -289,14 +322,15 @@ Question: {query}
 
 Answer:""",
 
-        QueryIntent.RETRIEVAL: """You are a fund performance analysis expert. Answer questions about fund performance using the provided context and metrics data, focusing on document-specific information.
+        QueryIntent.RETRIEVAL: """You are a fund performance analysis expert. Answer questions about fund performance using ONLY the provided context and metrics data. Focus on extracting and presenting specific information from documents.
 
-Key guidelines:
-- Base your answer on the provided context and metrics
-- Reference specific document sections
-- Be comprehensive but concise
-- Use specific data points from the context
-- If the question cannot be answered from the context, say so clearly
+CRITICAL INSTRUCTIONS:
+- You MUST extract and present specific data, tables, and details from the provided context
+- If the context contains tables with financial data (capital calls, distributions, adjustments), you MUST include that data in your answer
+- Present information in a clear, structured format
+- Do NOT say information is not available if it's actually provided in the context
+- Reference specific document sections and data points
+- Be comprehensive about the requested information
 
 Context:
 {context}
@@ -305,14 +339,15 @@ Question: {query}
 
 Answer:""",
 
-        QueryIntent.GENERAL: """You are a fund performance analysis expert. Answer questions about fund performance using the provided context and metrics data.
+        QueryIntent.GENERAL: """You are a fund performance analysis expert. Answer questions about fund performance using ONLY the provided context and metrics data.
 
-Key guidelines:
-- Base your answer on the provided context and metrics
+CRITICAL INSTRUCTIONS:
+- You MUST use the information provided in the "Context" section above
+- If the context contains tables, data, or specific information relevant to the question, you MUST include that information in your answer
+- Do NOT say you don't have information if it's actually provided in the context
+- Extract and present specific data points, tables, and details from the context
 - Be comprehensive but concise
-- Use specific data points from the context
-- Explain any complex concepts
-- If the question cannot be answered from the context, say so clearly
+- If the question cannot be answered from the provided context, say so clearly
 
 Context:
 {context}
@@ -467,9 +502,10 @@ class DoclingDocumentProcessor:
     def _initialize_chunker(self):
         """Initialize the Docling chunker with default settings."""
         try:
-            # Use Docling's HybridChunker for optimal chunking
-            self.chunker = HybridChunker(tokenizer=settings.EMBEDDING_MODEL)
-            logger.info("✓ Docling HybridChunker initialized")
+            # Use Docling's HybridChunker with sentence-transformers model
+            # Docling expects the model name, not just the provider type
+            self.chunker = HybridChunker(tokenizer="sentence-transformers/all-MiniLM-L6-v2")
+            logger.info("✓ Docling HybridChunker initialized with sentence-transformers")
         except Exception as e:
             logger.warning(f"Failed to initialize Docling chunker: {e}")
             self.chunker = None
@@ -520,12 +556,6 @@ class DoclingDocumentProcessor:
 class RAGEngine:
     """RAG engine for fund performance Q&A using Docling and LangChain"""
 
-    # Shared singleton instances to prevent model reloading
-    _shared_vector_store: Optional[VectorStore] = None
-    _shared_metrics_provider: Optional[MetricsProvider] = None
-    _shared_llm_provider: Optional[LLMProvider] = None
-    _shared_docling_processor: Optional[DoclingDocumentProcessor] = None
-
     def __init__(
         self,
         vector_store: Optional[VectorStore] = None,
@@ -533,34 +563,30 @@ class RAGEngine:
         llm_provider: Optional[LLMProvider] = None,
         docling_processor: Optional[DoclingDocumentProcessor] = None
     ):
-        # Use shared instances to prevent model reloading on each query
+        # Create fresh instances for each RAG engine to avoid shared state issues in Celery
         if vector_store is not None:
             self.vector_store = vector_store
         else:
-            if RAGEngine._shared_vector_store is None:
-                RAGEngine._shared_vector_store = VectorStore()
-            self.vector_store = RAGEngine._shared_vector_store
+            # Create new vector store instance for each query to avoid shared state issues
+            self.vector_store = VectorStore()
 
         if metrics_calculator is not None:
             self.metrics_provider = MetricsProvider(metrics_calculator)
         else:
-            if RAGEngine._shared_metrics_provider is None:
-                RAGEngine._shared_metrics_provider = MetricsProvider(MetricsCalculator(SessionLocal()))
-            self.metrics_provider = RAGEngine._shared_metrics_provider
+            # Create fresh metrics provider for each query
+            self.metrics_provider = MetricsProvider(MetricsCalculator(SessionLocal()))
 
         if llm_provider is not None:
             self.llm_provider = llm_provider
         else:
-            if RAGEngine._shared_llm_provider is None:
-                RAGEngine._shared_llm_provider = LLMFactory.create_llm()
-            self.llm_provider = RAGEngine._shared_llm_provider
+            # Create fresh LLM provider for each query
+            self.llm_provider = LLMFactory.create_llm()
 
         if docling_processor is not None:
             self.docling_processor = docling_processor
         else:
-            if RAGEngine._shared_docling_processor is None:
-                RAGEngine._shared_docling_processor = DoclingDocumentProcessor()
-            self.docling_processor = RAGEngine._shared_docling_processor
+            # Create fresh Docling processor for each query
+            self.docling_processor = DoclingDocumentProcessor()
 
         # Component initialization (create fresh instances for thread safety)
         self.intent_classifier = IntentClassifier()
@@ -598,8 +624,58 @@ class RAGEngine:
                 logger.info("Enhanced query with conversation context")
 
             # Step 3: Retrieve context
-            retrieved_docs = self.context_retriever.retrieve_sync(enhanced_query, fund_id)
-            logger.info(f"Retrieved {len(retrieved_docs)} document chunks")
+            logger.info(f"Searching for: '{enhanced_query}' with fund_id={fund_id}")
+
+            # Debug: Check if fund_id is None and how it affects filtering
+            if fund_id is None:
+                logger.warning("fund_id is None - searching across all documents without fund filtering")
+
+            # Try with lower similarity threshold for more lenient matching
+            retrieved_docs = self.context_retriever.retrieve_sync(enhanced_query, fund_id, similarity_threshold=0.1)
+            logger.info(f"Retrieved {len(retrieved_docs)} document chunks with threshold 0.1")
+
+            # Debug: Check similarity scores for failed retrievals
+            if len(retrieved_docs) == 0:
+                logger.warning(f"No chunks retrieved for query: '{enhanced_query}' with threshold 0.1")
+                # Try with very low threshold as last resort
+                try:
+                    fallback_docs = self.context_retriever.retrieve_sync(enhanced_query, fund_id, similarity_threshold=0.0)
+                    logger.info(f"Fallback retrieval with threshold 0.0: {len(fallback_docs)} chunks")
+                    if len(fallback_docs) > 0:
+                        logger.info("Using fallback results with very low similarity threshold")
+                        retrieved_docs = fallback_docs
+                except Exception as fallback_error:
+                    logger.warning(f"Fallback retrieval failed: {fallback_error}")
+
+            # Check if vector store is empty
+            if len(retrieved_docs) == 0:
+                logger.warning("No documents found in vector store - user needs to upload documents first")
+                # Return helpful message instead of proceeding with empty context
+                return {
+                    "response": "I don't have any documents to analyze yet. Please upload a fund performance report first, then I can help you analyze metrics like DPI, IRR, and answer questions about capital calls, distributions, and adjustments.",
+                    "intent": intent.value,
+                    "context_used": False,
+                    "success": True,
+                    "query": query,
+                    "fund_id": fund_id,
+                    "retrieved_chunks": 0,
+                    "has_metrics": False,
+                    "processing_time": round(time.time() - start_time, 2),
+                    "sources": [],
+                    "metadata": {"no_documents": True}
+                }
+
+            # Debug: Log retrieved chunks and their content preview
+            for i, doc in enumerate(retrieved_docs[:5]):  # Check more chunks
+                content_preview = doc.get("content", "")[:300]  # Longer preview
+                score = doc.get("score", 0)
+                metadata = doc.get("metadata", {})
+                fund_id_meta = metadata.get("fund_id")
+                logger.info(f"Chunk {i+1}: score={score:.4f}, fund_id={fund_id_meta}, content='{content_preview}...'")
+                if "capital calls" in doc.get("content", "").lower():
+                    logger.info(f"✓ Chunk {i+1} CONTAINS CAPITAL CALLS!")
+                elif "capital" in doc.get("content", "").lower():
+                    logger.info(f"~ Chunk {i+1} contains 'capital' but not 'calls'")
 
             # Step 4: Get metrics data
             metrics_data = self.metrics_provider.get_metrics(fund_id) if fund_id else {}
@@ -608,6 +684,12 @@ class RAGEngine:
 
             # Step 5: Format context
             context = self.context_formatter.format(retrieved_docs, metrics_data)
+            logger.info(f"Formatted context length: {len(context)}")
+            logger.info(f"Context preview: {context[:1000]}...")
+            if "capital calls" in context.lower():
+                logger.info("✓ Context contains 'capital calls'")
+            else:
+                logger.warning("✗ Context does NOT contain 'capital calls'")
 
             # Step 6: Generate response
             result = self.response_generator.generate(query, context, intent)

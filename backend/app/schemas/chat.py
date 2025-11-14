@@ -39,6 +39,7 @@ class ChatQueryResponse(BaseModel):
     sources: List[SourceDocument] = []
     metrics: Optional[Dict[str, Any]] = None
     processing_time: Optional[float] = None
+    task_id: Optional[str] = None  # For async processing
 
 
 class ConversationCreate(BaseModel):

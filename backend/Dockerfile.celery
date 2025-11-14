@@ -1,0 +1,83 @@
+# Multi-stage build for Celery worker with ML dependencies
+# Build-time variables (can be overridden with --build-arg):
+# - PYTHON_VERSION: Python version to use (default: 3.11)
+FROM python:3.11-slim AS celery-builder
+
+# Add labels for better tracking
+LABEL maintainer="Fund Analysis" \
+      version="1.0" \
+      description="Fund Analysis Celery Worker"
+
+# Install system dependencies for ML libraries
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    libpq-dev \
+    curl \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    pkg-config \
+    libgl1 \
+    libglib2.0-0 \
+    && apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+WORKDIR /app
+
+# Copy and install Celery/ML dependencies
+COPY requirements-common.txt requirements-celery.txt ./
+RUN pip install --no-cache-dir -r requirements-celery.txt
+
+# Production stage
+FROM python:3.11-slim
+
+# Install minimal runtime dependencies for ML
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    libpq5 \
+    curl \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libgomp1 \
+    libgl1 \
+    libglib2.0-0 \
+    && apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Create non-root user for security
+RUN groupadd -g 1001 appuser && \
+    useradd -u 1001 -g appuser -d /home/appuser -s /bin/bash -c "Application User" appuser && \
+    mkdir -p /home/appuser && \
+    chown -R appuser:appuser /home/appuser
+
+WORKDIR /app
+
+# Copy installed packages from builder stage
+COPY --from=celery-builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=celery-builder /usr/local/bin /usr/local/bin
+
+# Copy application code
+COPY . .
+
+# Copy lazy model loader to app directory for easier importing
+COPY lazy_model_loader.py app/
+RUN cp app/lazy_model_loader.py . && cp app/lazy_model_loader.py app/app_lazy_model_loader.py
+
+# Create necessary directories with proper permissions
+RUN mkdir -p /app/uploads /app/vector_store /app/faiss_index && \
+    chown -R appuser:appuser /app
+
+# Switch to non-root user for security
+USER appuser
+
+# Health check for Celery worker
+HEALTHCHECK --interval=60s --timeout=30s --start-period=30s --retries=3 \
+    CMD celery -A app.core.celery_app inspect ping || exit 1
+
+# Run Celery worker
+CMD ["celery", "-A", "app.core.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
