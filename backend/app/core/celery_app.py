@@ -54,13 +54,18 @@ def initialize_lazy_model_loader(sender, **kwargs):
         # Preload only the most critical models (optional, can be removed for maximum size reduction)
         try:
             preload_critical_models()
+            logger.info("✓ Critical models preloaded successfully in worker")
         except Exception as e:
             logger.warning(f"Could not preload critical models: {e}")
+            import traceback
+            traceback.print_exc()
 
         logger.info("✓ Lazy model loader initialized in Celery worker")
 
     except Exception as e:
         logger.error(f"Failed to initialize lazy model loader: {e}")
+        import traceback
+        traceback.print_exc()
 
 def get_cached_model(model_name: str):
     """Get a cached model instance using lazy loading."""

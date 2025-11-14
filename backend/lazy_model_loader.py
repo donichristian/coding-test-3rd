@@ -161,7 +161,11 @@ def preload_critical_models():
 
         # Preload sentence transformer for embeddings
         try:
-            get_sentence_transformer()
+            model = get_sentence_transformer()
+            if model is not None:
+                logger.info("✓ Sentence transformer preloaded successfully")
+            else:
+                logger.warning("Sentence transformer preloading returned None")
         except Exception as e:
             logger.warning(f"Could not preload sentence transformer: {e}")
 
@@ -172,16 +176,22 @@ def preload_critical_models():
             # Try to preload OpenAI client
             if hasattr(settings, 'OPENAI_API_KEY') and settings.OPENAI_API_KEY:
                 try:
-                    get_openai_client()
-                    logger.info("✓ OpenAI client preloaded")
+                    client = get_openai_client()
+                    if client is not None:
+                        logger.info("✓ OpenAI client preloaded")
+                    else:
+                        logger.warning("OpenAI client preloading returned None")
                 except Exception as e:
                     logger.warning(f"Could not preload OpenAI client: {e}")
 
             # Try to preload Gemini client
             if hasattr(settings, 'GEMINI_API_KEY') and settings.GEMINI_API_KEY:
                 try:
-                    get_gemini_client()
-                    logger.info("✓ Gemini client preloaded")
+                    client = get_gemini_client()
+                    if client is not None:
+                        logger.info("✓ Gemini client preloaded")
+                    else:
+                        logger.warning("Gemini client preloading returned None")
                 except Exception as e:
                     logger.warning(f"Could not preload Gemini client: {e}")
 
@@ -192,6 +202,8 @@ def preload_critical_models():
 
     except Exception as e:
         logger.error(f"Failed to preload critical models: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 def preload_docling_models():
@@ -200,42 +212,112 @@ def preload_docling_models():
 
     This ensures models are cached before actual document processing.
     """
+    import os
+
     try:
         logger.info("Preloading Docling models by processing dummy document...")
 
         # Get the converter (this creates it but doesn't download models yet)
         converter = get_docling_converter()
 
-        # Create a minimal dummy PDF to trigger model downloads
-        import tempfile
-        import os
-        from pypdf import PdfWriter
+        # Try to use an existing sample PDF if available
+        sample_pdf_path = None
+        possible_paths = [
+            "/app/files/Sample_Fund_Performance_Report.pdf",
+            "/app/files/ILPA based Capital Accounting and Performance Metrics_ PIC, Net PIC, DPI, IRR  .pdf",
+            "./files/Sample_Fund_Performance_Report.pdf",
+            "./files/ILPA based Capital Accounting and Performance Metrics_ PIC, Net PIC, DPI, IRR  .pdf"
+        ]
 
-        # Create minimal valid PDF
-        writer = PdfWriter()
-        writer.add_blank_page(width=612, height=792)
+        for path in possible_paths:
+            if os.path.exists(path) and os.path.getsize(path) > 0:
+                try:
+                    # Check if file is readable
+                    with open(path, 'rb') as f:
+                        f.read(100)  # Read first 100 bytes
+                    sample_pdf_path = path
+                    logger.info(f"Using existing sample PDF: {path} (size: {os.path.getsize(path)} bytes)")
+                    break
+                except Exception as e:
+                    logger.warning(f"Sample PDF {path} exists but is not readable: {e}")
+                    continue
 
-        # Write to temporary file
-        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as temp_file:
-            temp_pdf_path = temp_file.name
-            writer.write(temp_file)
+        # If no sample PDF found, create a more complex dummy PDF
+        if not sample_pdf_path:
+            import tempfile
+            import os
+            try:
+                from pypdf import PdfWriter
+                from reportlab.pdfgen import canvas
+                from reportlab.lib.pagesizes import letter
+
+                # Create a PDF with some text content to better trigger model downloads
+                with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as temp_file:
+                    temp_pdf_path = temp_file.name
+
+                # Use reportlab to create a PDF with text
+                c = canvas.Canvas(temp_pdf_path, pagesize=letter)
+                c.drawString(100, 750, "Sample Fund Performance Report")
+                c.drawString(100, 730, "Capital Calls: $1,000,000")
+                c.drawString(100, 710, "Distributions: $500,000")
+                c.drawString(100, 690, "Date: 2024-01-01")
+                c.save()
+
+                sample_pdf_path = temp_pdf_path
+                logger.info("Created dummy PDF with text content for model preloading")
+
+            except ImportError:
+                # Fallback to pypdf only
+                from pypdf import PdfWriter
+
+                # Create minimal valid PDF
+                writer = PdfWriter()
+                writer.add_blank_page(width=612, height=792)
+
+                # Write to temporary file
+                with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as temp_file:
+                    temp_pdf_path = temp_file.name
+                    writer.write(temp_file)
+
+                sample_pdf_path = temp_pdf_path
+                logger.info("Created minimal dummy PDF for model preloading")
 
         try:
-            # Process the dummy PDF to trigger model downloads
-            logger.info("Processing dummy PDF to download Docling models...")
-            result = converter.convert(temp_pdf_path)
-            logger.info("✓ Docling models downloaded and cached successfully")
-        finally:
-            # Clean up
-            try:
-                os.unlink(temp_pdf_path)
-            except:
-                pass
+            # Process the PDF to trigger model downloads
+            import os
+            logger.info(f"Processing PDF {os.path.basename(sample_pdf_path)} to download Docling models...")
+            import time
+            start_time = time.time()
+            result = converter.convert(sample_pdf_path)
+            conversion_time = time.time() - start_time
 
-    except ImportError:
-        logger.warning("pypdf not available for dummy PDF creation - models will download on first use")
+            if result and hasattr(result, 'document'):
+                logger.info(f"Finished converting document {os.path.basename(sample_pdf_path)} in {conversion_time:.2f} sec.")
+                logger.info("✓ Docling models downloaded and cached successfully")
+                # Log some info about the result
+                doc = result.document
+                if hasattr(doc, 'pages'):
+                    logger.info(f"Preloading conversion: {len(doc.pages)} pages processed")
+                if hasattr(doc, 'tables'):
+                    logger.info(f"Preloading conversion: {len(doc.tables)} tables found")
+            else:
+                logger.warning("Docling conversion during preloading returned no result")
+        except Exception as convert_error:
+            logger.warning(f"Docling conversion during preloading failed: {convert_error}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            # Clean up if we created a temp file
+            if sample_pdf_path and sample_pdf_path.startswith('/tmp/'):
+                try:
+                    os.unlink(sample_pdf_path)
+                except:
+                    pass
+
     except Exception as e:
         logger.warning(f"Could not preload Docling models: {e} - models will download on first use")
+        import traceback
+        traceback.print_exc()
 
 
 def clear_model_cache():
