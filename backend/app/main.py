@@ -32,35 +32,6 @@ app.include_router(funds.router, prefix="/api/funds", tags=["funds"])
 app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
 app.include_router(metrics.router, prefix="/api/metrics", tags=["metrics"])
 
-
-@app.on_event("startup")
-async def startup_event():
-    """Preload ML models on startup to avoid runtime downloads."""
-    try:
-        logger.info("Preloading ML models on FastAPI startup...")
-        
-        # Import preload functions - single source of truth from preload_models.py
-        import sys
-        import os
-        sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-        from preload_models import preload_sentence_transformers, preload_docling_models, preload_rapidocr_models
-        
-        # Run preloading
-        results = {
-            "sentence_transformers": preload_sentence_transformers(),
-            "docling": preload_docling_models(),
-            "rapidocr": preload_rapidocr_models(),
-        }
-        
-        # Log results
-        for model_name, success in results.items():
-            status = "✓" if success else "✗"
-            logger.info(f"{status} {model_name} model preloading")
-            
-    except Exception as e:
-        logger.warning(f"Failed to preload models on startup: {e}")
-
-
 @app.get("/")
 async def root():
     """Root endpoint"""

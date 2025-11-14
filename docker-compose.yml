@@ -1,8 +1,5 @@
 version: '3.8'
 
-# Development profile (default) - uses bind mounts and dev servers
-# Production profile - uses built images with proper caching and tagging
-
 services:
   postgres:
     image: pgvector/pgvector:pg15
@@ -38,7 +35,7 @@ services:
   backend:
     build:
       context: ./backend
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.backend
     container_name: fund-backend
     ports:
       - "8000:8000"
@@ -53,7 +50,7 @@ services:
     volumes:
       - ./backend:/app
       - ./files:/app/files
-      - backend_uploads:/app/uploads
+      - ./uploads:/app/uploads
     depends_on:
       postgres:
         condition: service_healthy
@@ -68,7 +65,7 @@ services:
   celery_worker:
     build:
       context: ./backend
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.celery
     container_name: fund-celery-worker
     command: celery -A app.core.celery_app worker --loglevel=info --concurrency=2
     environment:
@@ -78,11 +75,12 @@ services:
       - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4-turbo-preview}
       - OPENAI_EMBEDDING_MODEL=${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
       - UPLOAD_DIR=/app/uploads
     volumes:
       - ./backend:/app
       - ./files:/app/files
-      - backend_uploads:/app/uploads
+      - ./uploads:/app/uploads
     depends_on:
       postgres:
         condition: service_healthy
@@ -104,9 +102,10 @@ services:
       - /app/.next
     depends_on:
       - backend
-    command: npm run dev
+    # Override Dockerfile user for development (needs write access to mounted volumes)
+    user: root
+    command: sh -c "npm install && npm run dev"
 
 volumes:
   postgres_data:
   redis_data:
-  backend_uploads:

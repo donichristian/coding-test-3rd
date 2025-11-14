@@ -14,6 +14,8 @@ import json
 import logging
 from contextlib import asynccontextmanager
 from typing import List, Dict, Any, Optional
+import threading
+import time
 
 import numpy as np
 from sqlalchemy import text
@@ -51,9 +53,8 @@ class VectorStore:
             db: SQLAlchemy session (creates new one if None)
         """
         self.db = db
-        self.embedding_configs = settings.EMBEDDING_CONFIGS
         self.embedding_provider = self._initialize_embeddings()
-        self.embedding_dimensions = self.embedding_configs.get(
+        self.embedding_dimensions = settings.EMBEDDING_CONFIGS.get(
             self.embedding_provider, {"dimensions": 384}
         )["dimensions"]
 
@@ -100,7 +101,7 @@ class VectorStore:
         for provider_name, init_func in providers:
             try:
                 if init_func():
-                    config = self.embedding_configs[provider_name]
+                    config = settings.EMBEDDING_CONFIGS[provider_name]
                     logger.info(f"✓ Using {provider_name} embeddings: {config['description']}")
                     return provider_name
             except Exception as e:
@@ -111,48 +112,23 @@ class VectorStore:
         return None
 
     def _init_sentence_transformers(self) -> bool:
-        """Initialize sentence-transformers model."""
+        """Initialize sentence-transformers model using lazy loading."""
         try:
-            # First try to get from global cache
+            # Try to get from lazy model loader
             try:
-                from app.core.model_cache import get_cached_model, is_model_cached
-                if is_model_cached('sentence_transformers'):
-                    cached_model = get_cached_model('sentence_transformers')
-                    logger.info("Using cached sentence-transformers model from global cache")
-                    self._embedding_model = cached_model
-                    return True
-            except ImportError:
-                pass  # Global cache not available
+                from lazy_model_loader import get_sentence_transformer
+                self._embedding_model = get_sentence_transformer()
+                logger.info("Using lazy-loaded sentence-transformers model")
+                return True
+            except Exception as e:
+                logger.warning(f"Could not get lazy-loaded sentence transformer: {e}")
 
-            # Fallback: initialize model normally
-            from sentence_transformers import SentenceTransformer
-            logger.info("Initializing sentence-transformers model...")
-
-            # Check if model is already cached from Docker build
-            import os
-            model_path = os.path.expanduser("~/.cache/torch/sentence_transformers/all-MiniLM-L6-v2")
-            if os.path.exists(model_path):
-                logger.info("✓ Using pre-cached sentence-transformers model from Docker build")
-            else:
-                logger.info("Downloading sentence-transformers model...")
-
-            self._embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-            
-            # Cache the model globally for reuse
-            try:
-                from app.core.model_cache import set_cached_model
-                set_cached_model('sentence_transformers', self._embedding_model)
-                logger.info("✓ Sentence-transformers model cached globally")
-            except ImportError:
-                logger.debug("Global cache not available in current context")
-            
-            logger.info("✓ Sentence-transformers model initialized successfully")
+            # Fallback: Model will be lazy-loaded when actually needed
+            logger.debug("Sentence-transformers model will be loaded on-demand")
             return True
-        except ImportError:
-            logger.warning("sentence_transformers package not available")
-            return False
+
         except Exception as e:
-            logger.error(f"Failed to initialize sentence-transformers: {e}")
+            logger.warning(f"Error in sentence-transformers initialization: {e}")
             return False
 
     def _init_gemini(self) -> bool:
@@ -188,89 +164,23 @@ class VectorStore:
         This method verifies the setup is correct.
         """
         if self.db is None:
-            logger.warning("No database session available for extension verification")
+            logger.debug("No database session available for extension verification")
             return
 
         try:
             # Enable pgvector extension (idempotent operation)
             self.db.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-
-            # Verify table exists
-            result = self.db.execute(text("SELECT 1 FROM document_embeddings LIMIT 1;"))
-            result.fetchone()  # Consume the result
-            logger.info("✓ Table document_embeddings exists and is accessible")
-
+            
+            # Skip table verification to avoid hanging - this can cause issues during document processing
+            # The table should exist from init_db.py, and we can handle missing table errors during actual usage
+            logger.debug("pgvector extension enabled (table verification skipped to avoid hanging)")
             self.db.commit()
 
         except Exception as e:
-            logger.warning(f"pgvector extension or table verification failed: {e}")
-            logger.info("Note: This may be expected during initial setup. Run database initialization if needed.")
+            logger.debug(f"pgvector extension setup failed (non-critical): {e}")
             if self.db:
                 self.db.rollback()
     
-    async def add_document(self, content: str, metadata: Dict[str, Any]) -> bool:
-        """
-        Add a single document to the vector store.
-
-        TODO: Implement this method
-        - Generate embedding for content
-        - Insert into document_embeddings table
-        - Store metadata as JSONB
-
-        Args:
-            content: Document text content
-            metadata: Document metadata (document_id, fund_id, etc.)
-
-        Returns:
-            True if successful, False otherwise
-
-        Raises:
-            ValueError: If required metadata is missing
-            SQLAlchemyError: If database operation fails
-        """
-        if not content or not content.strip():
-            raise ValueError("Content cannot be empty")
-
-        required_fields = ["document_id", "fund_id"]
-        missing_fields = [field for field in required_fields if field not in metadata]
-        if missing_fields:
-            raise ValueError(f"Missing required metadata fields: {missing_fields}")
-
-        async with self._get_db_session() as db:
-            try:
-                # Generate embedding
-                embedding = await self._get_embedding(content)
-                embedding_list = embedding.tolist()
-
-                # Prepare metadata as JSON
-                metadata_json = json.dumps(metadata)
-
-                # Insert into database
-                insert_sql = text("""
-                    INSERT INTO document_embeddings (document_id, fund_id, content, embedding, metadata)
-                    VALUES (:document_id, :fund_id, :content, :embedding, :metadata)
-                """)
-
-                db.execute(insert_sql, {
-                    "document_id": metadata["document_id"],
-                    "fund_id": metadata["fund_id"],
-                    "content": content,
-                    "embedding": f"[{','.join(map(str, embedding_list))}]",
-                    "metadata": metadata_json
-                })
-
-                await db.commit()
-                logger.debug(f"Added document {metadata['document_id']} to vector store")
-                return True
-
-            except SQLAlchemyError as e:
-                await db.rollback()
-                logger.error(f"Database error adding document: {e}")
-                raise
-            except Exception as e:
-                await db.rollback()
-                logger.error(f"Error adding document: {e}")
-                raise
 
     async def store_chunks(self, chunks: List[Dict[str, Any]]) -> bool:
         """
@@ -289,7 +199,7 @@ class VectorStore:
         logger.info(f"Storing {len(chunks)} text chunks in vector database")
 
         # Process chunks in batches to avoid overwhelming the API
-        batch_size = 10
+        batch_size = settings.BATCH_SIZE
         total_stored = 0
 
         async with self._get_db_session() as db:
@@ -352,124 +262,108 @@ class VectorStore:
                 logger.error(f"Error storing chunks in vector database: {e}")
                 await db.rollback()
                 return False
-    
-    async def similarity_search(
-        self,
-        query: str,
-        k: int = 5,
-        filter_metadata: Optional[Dict[str, Any]] = None,
-        similarity_threshold: Optional[float] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Search for similar documents using cosine similarity.
 
-        TODO: Implement this method
-        - Generate query embedding
-        - Use pgvector's <=> operator for cosine distance
-        - Apply metadata filters if provided
-        - Return top k results
+    def store_chunks_sync(self, chunks: List[Dict[str, Any]]) -> bool:
+        """
+        Synchronous version of store_chunks for Celery context.
 
         Args:
-            query: Search query text
-            k: Number of results to return (default: 5)
-            filter_metadata: Optional metadata filters (e.g., {"fund_id": 1})
-            similarity_threshold: Minimum similarity score (0.0-1.0)
+            chunks: List of chunks with content and metadata
 
         Returns:
-            List of similar documents with similarity scores
-
-        Raises:
-            ValueError: If query is empty or k is invalid
-            SQLAlchemyError: If database operation fails
+            True if chunks stored successfully, False otherwise
         """
-        if not query or not query.strip():
-            raise ValueError("Query cannot be empty")
+        if not chunks:
+            logger.info("No chunks to store")
+            return True
 
-        if k <= 0:
-            raise ValueError("k must be positive")
+        logger.info(f"Storing {len(chunks)} text chunks in vector database")
 
-        async with self._get_db_session() as db:
-            try:
-                # Generate query embedding
-                query_embedding = await self._get_embedding(query)
-                embedding_list = query_embedding.tolist()
+        batch_size = settings.BATCH_SIZE
+        total_stored = 0
 
-                # Build WHERE clause for metadata filters
-                where_conditions = []
-                params = {"k": k}
+        db = SessionLocal()
+        try:
+            # Skip extension setup during document processing to avoid hanging
+            logger.debug("Skipping extension verification during document processing")
+            
+            for batch_idx, i in enumerate(range(0, len(chunks), batch_size)):
+                batch = chunks[i:i + batch_size]
+                batch_num = batch_idx + 1
 
-                if filter_metadata:
-                    for key, value in filter_metadata.items():
-                        if key in ["document_id", "fund_id"]:
-                            where_conditions.append(f"{key} = :{key}")
-                            params[key] = value
+                try:
+                    # Generate embeddings for batch synchronously
+                    embeddings = []
+                    valid_chunks = []
+                    logger.info(f"Starting embedding generation for batch {batch_num}...")
+                    for chunk in batch:
+                        logger.debug(f"Processing chunk {len(embeddings)+1}/{len(batch)}...")
+                        embedding = self._get_embedding_sync(chunk["content"])
+                        if embedding is not None and not np.allclose(embedding, 0):
+                            embeddings.append(embedding)
+                            valid_chunks.append(chunk)
+                            logger.debug(f"✓ Generated embedding for chunk {len(embeddings)}")
+                        else:
+                            logger.warning(f"Skipping chunk with invalid embedding: {chunk.get('content', '')[:50]}...")
 
-                where_clause = " AND ".join(where_conditions) if where_conditions else ""
+                    logger.info(f"Batch {batch_num} embedding generation completed: {len(valid_chunks)}/{len(batch)} valid chunks")
 
-                # Build threshold condition
-                threshold_condition = ""
-                if similarity_threshold is not None and similarity_threshold > 0:
-                    # Use WHERE if no other conditions, otherwise AND
-                    condition_prefix = "WHERE" if not where_clause else "AND"
-                    threshold_condition = f" {condition_prefix} 1 - (embedding <=> (:embedding)::vector) >= :threshold"
-                    params["threshold"] = similarity_threshold
+                    if not valid_chunks:
+                        logger.warning(f"No valid chunks in batch {batch_num}")
+                        continue
 
-                # Search using pgvector cosine similarity
-                # <=> operator returns cosine distance, so we order by it ascending
-                # Use proper vector syntax for pgvector
-                search_sql = text(f"""
-                    SELECT
-                        id,
-                        document_id,
-                        fund_id,
-                        content,
-                        metadata,
-                        1 - (embedding <=> (:embedding)::vector) as similarity_score
-                    FROM document_embeddings
-                    {f"WHERE {where_clause}" if where_clause else ""}{threshold_condition}
-                    ORDER BY embedding <=> (:embedding)::vector
-                    LIMIT :k
-                """)
+                    # Store batch in single transaction
+                    for j, chunk in enumerate(valid_chunks):
+                        embedding = embeddings[j]
+                        embedding_list = embedding.tolist()
 
-                result = db.execute(search_sql, {
-                    "embedding": f"[{','.join(map(str, embedding_list))}]",
-                    **params
-                })
+                        # Prepare metadata
+                        metadata = chunk.get("metadata", {})
+                        document_id = metadata.get("document_id")
+                        fund_id = metadata.get("fund_id")
 
-                # Format results
-                results = []
-                for row in result:
-                    score = float(row[5])
-                    # Validate and clamp similarity score
-                    if not (0.0 <= score <= 1.0) or np.isnan(score) or np.isinf(score):
-                        score = 0.0
+                        if not document_id or not fund_id:
+                            logger.warning(f"Skipping chunk with missing metadata: doc_id={document_id}, fund_id={fund_id}")
+                            continue
 
-                    # Parse metadata JSON
-                    metadata = row[4]
-                    if isinstance(metadata, str):
-                        try:
-                            metadata = json.loads(metadata)
-                        except json.JSONDecodeError:
-                            metadata = {}
+                        # Insert into database
+                        insert_sql = text("""
+                            INSERT INTO document_embeddings (document_id, fund_id, content, embedding, metadata)
+                            VALUES (:document_id, :fund_id, :content, :embedding, :metadata)
+                        """)
 
-                    results.append({
-                        "id": row[0],
-                        "document_id": row[1],
-                        "fund_id": row[2],
-                        "content": row[3],
-                        "metadata": metadata,
-                        "score": score
-                    })
+                        metadata_json = json.dumps(metadata)
 
-                logger.debug(f"Similarity search returned {len(results)} results for query: {query[:50]}...")
-                return results
+                        db.execute(insert_sql, {
+                            "document_id": document_id,
+                            "fund_id": fund_id,
+                            "content": chunk["content"],
+                            "embedding": f"[{','.join(map(str, embedding_list))}]",
+                            "metadata": metadata_json
+                        })
 
-            except SQLAlchemyError as e:
-                logger.error(f"Database error in similarity search: {e}")
-                raise
-            except Exception as e:
-                logger.error(f"Error in similarity search: {e}")
-                return []
+                    # Commit batch
+                    db.commit()
+                    stored_in_batch = len(valid_chunks)
+                    total_stored += stored_in_batch
+                    logger.info(f"Stored batch {batch_num}: {stored_in_batch} chunks")
+
+                except Exception as batch_error:
+                    logger.error(f"Error storing batch {batch_num}: {batch_error}")
+                    db.rollback()
+                    # Continue with next batch instead of failing completely
+
+            logger.info(f"Successfully stored {total_stored}/{len(chunks)} chunks in vector database")
+            return total_stored > 0
+
+        except Exception as e:
+            logger.error(f"Error storing chunks in vector database: {e}")
+            db.rollback()
+            return False
+        finally:
+            db.close()
+    
+
     def similarity_search_sync(
         self,
         query: str,
@@ -478,13 +372,13 @@ class VectorStore:
         similarity_threshold: Optional[float] = None
     ) -> List[Dict[str, Any]]:
         """
-        Synchronous version of similarity_search for Celery.
+        Synchronous version of similarity_search for API endpoints.
 
         Args:
             query: Search query text
             k: Number of results to return (default: 5)
             filter_metadata: Optional metadata filters
-            similarity_threshold: Minimum similarity score (0.0-1.0)
+            similarity_threshold: Minimum similarity score (uses config.SIMILARITY_THRESHOLD if None)
 
         Returns:
             List of similar documents with similarity scores
@@ -494,6 +388,10 @@ class VectorStore:
 
         if k <= 0:
             raise ValueError("k must be positive")
+
+        # Use config value if threshold not specified
+        if similarity_threshold is None:
+            similarity_threshold = settings.SIMILARITY_THRESHOLD
 
         db = SessionLocal()
         try:
@@ -503,23 +401,19 @@ class VectorStore:
 
             # Build WHERE clause for metadata filters
             where_conditions = []
-            params = {"k": k}
+            params = {"k": k * settings.SIMILARITY_SEARCH_MULTIPLIER}  # Get more results to account for filtering
 
             if filter_metadata:
                 for key, value in filter_metadata.items():
                     if key in ["document_id", "fund_id"]:
-                        where_conditions.append(f"{key} = :{key}")
-                        params[key] = value
+                        if value is not None:  # Only filter if value is not None
+                            where_conditions.append(f"{key} = :{key}")
+                            params[key] = value
+                        else:
+                            logger.debug(f"Skipping {key} filter because value is None")
 
             where_clause = " AND ".join(where_conditions) if where_conditions else ""
-
-            # Build threshold condition
-            threshold_condition = ""
-            if similarity_threshold is not None and similarity_threshold > 0:
-                # Use WHERE if no other conditions, otherwise AND
-                condition_prefix = "WHERE" if not where_clause else "AND"
-                threshold_condition = f" {condition_prefix} 1 - (embedding <=> (:embedding)::vector) >= :threshold"
-                params["threshold"] = similarity_threshold
+            logger.debug(f"WHERE clause: '{where_clause}', params: {params}")
 
             # Search using pgvector cosine similarity
             search_sql = text(f"""
@@ -532,7 +426,6 @@ class VectorStore:
                     1 - (embedding <=> (:embedding)::vector) as similarity_score
                 FROM document_embeddings
                 {f"WHERE {where_clause}" if where_clause else ""}
-                {threshold_condition}
                 ORDER BY embedding <=> (:embedding)::vector
                 LIMIT :k
             """)
@@ -542,13 +435,17 @@ class VectorStore:
                 **params
             })
 
-            # Format results
+            # Format results and apply similarity threshold
             results = []
             for row in result:
                 score = float(row[5])
                 # Validate and clamp similarity score
                 if not (0.0 <= score <= 1.0) or np.isnan(score) or np.isinf(score):
                     score = 0.0
+
+                # Apply similarity threshold filter
+                if score < similarity_threshold:
+                    continue
 
                 # Parse metadata JSON
                 metadata = row[4]
@@ -567,7 +464,19 @@ class VectorStore:
                     "score": score
                 })
 
-            logger.debug(f"Similarity search returned {len(results)} results for query: {query[:50]}...")
+            # Limit to top k after filtering
+            results = results[:k]
+
+            # Log all similarity scores before filtering
+            all_scores = []
+            for row in result:
+                score = float(row[5])
+                if not (0.0 <= score <= 1.0) or np.isnan(score) or np.isinf(score):
+                    score = 0.0
+                all_scores.append(score)
+
+            logger.debug(f"All similarity scores for query '{query[:50]}...': {sorted(all_scores, reverse=True)[:10]}")
+            logger.debug(f"Similarity search returned {len(results)} results above threshold {similarity_threshold} for query: {query[:50]}...")
             return results
 
         except Exception as e:
@@ -597,7 +506,6 @@ class VectorStore:
             if self.embedding_provider == "sentence-transformers":
                 if self._embedding_model is None:
                     logger.error("Sentence transformers model not initialized - reinitializing...")
-                    # Try to reinitialize the model
                     if self._init_sentence_transformers():
                         embedding = self._embedding_model.encode(text, convert_to_numpy=True)
                         return np.array(embedding, dtype=np.float32)
@@ -619,12 +527,11 @@ class VectorStore:
 
         except Exception as e:
             logger.error(f"Error generating embedding: {e}")
-            # Return zero vector as fallback to prevent system failure
             return np.zeros(self.embedding_dimensions, dtype=np.float32)
 
     def _get_embedding_sync(self, text: str) -> np.ndarray:
         """
-        Synchronous version of _get_embedding for Celery context.
+        Synchronous version of _get_embedding for Celery context with timeout protection.
 
         Args:
             text: Input text to embed
@@ -637,25 +544,62 @@ class VectorStore:
 
         try:
             if self.embedding_provider == "sentence-transformers":
+                # Lazy load model if not already loaded
                 if self._embedding_model is None:
-                    logger.error("Sentence transformers model not initialized - reinitializing...")
-                    # Try to reinitialize the model
-                    if self._init_sentence_transformers():
-                        embedding = self._embedding_model.encode(text, convert_to_numpy=True)
-                        return np.array(embedding, dtype=np.float32)
-                    else:
-                        logger.error("Failed to reinitialize sentence transformers model")
+                    try:
+                        from lazy_model_loader import get_sentence_transformer
+                        self._embedding_model = get_sentence_transformer()
+                        logger.debug("Using lazy-loaded sentence-transformers model")
+                    except Exception as model_error:
+                        logger.error(f"Failed to load sentence-transformers model: {model_error}")
+                        # Return zero vector instead of failing
                         return np.zeros(self.embedding_dimensions, dtype=np.float32)
-                embedding = self._embedding_model.encode(text, convert_to_numpy=True)
-                return np.array(embedding, dtype=np.float32)
+
+                # Generate embedding with timeout protection
+                if self._embedding_model is not None:
+                    try:
+                        # Thread-based timeout protection for embedding generation
+                        result = [None]
+                        exception = [None]
+                        
+                        def encode_text():
+                            try:
+                                embedding = self._embedding_model.encode(text, convert_to_numpy=True)
+                                result[0] = embedding
+                            except Exception as e:
+                                exception[0] = e
+                        
+                        # Start encoding in separate thread
+                        encode_thread = threading.Thread(target=encode_text)
+                        encode_thread.daemon = True
+                        encode_thread.start()
+                        encode_thread.join(timeout=settings.EMBEDDING_TIMEOUT)  # Configurable timeout
+                        
+                        if encode_thread.is_alive():
+                            logger.warning(f"Embedding generation timed out for text: {text[:50]}...")
+                            return np.zeros(self.embedding_dimensions, dtype=np.float32)
+                        
+                        if exception[0]:
+                            logger.warning(f"Failed to encode text: {exception[0]}")
+                            return np.zeros(self.embedding_dimensions, dtype=np.float32)
+                        
+                        if result[0] is not None:
+                            return np.array(result[0], dtype=np.float32)
+                        else:
+                            logger.warning("Embedding generation returned no result")
+                            return np.zeros(self.embedding_dimensions, dtype=np.float32)
+                    except Exception as encode_error:
+                        logger.warning(f"Failed to encode text: {encode_error}")
+                        return np.zeros(self.embedding_dimensions, dtype=np.float32)
+                else:
+                    logger.warning("Sentence-transformers model not available, returning zero vector")
+                    return np.zeros(self.embedding_dimensions, dtype=np.float32)
 
             elif self.embedding_provider == "gemini":
-                # For sync context, we'll need to handle this differently
                 logger.warning("Gemini embeddings not available in sync context")
                 return np.zeros(self.embedding_dimensions, dtype=np.float32)
 
             elif self.embedding_provider == "openai":
-                # For sync context, we'll need to handle this differently
                 logger.warning("OpenAI embeddings not available in sync context")
                 return np.zeros(self.embedding_dimensions, dtype=np.float32)
 
@@ -665,7 +609,6 @@ class VectorStore:
 
         except Exception as e:
             logger.error(f"Error generating embedding synchronously: {e}")
-            # Return zero vector as fallback to prevent system failure
             return np.zeros(self.embedding_dimensions, dtype=np.float32)
 
     async def _get_gemini_embedding(self, text: str) -> np.ndarray:
@@ -683,7 +626,6 @@ class VectorStore:
             return np.array(result.embeddings[0].values, dtype=np.float32)
 
         except ImportError:
-            # Fallback to old API
             import google.generativeai as genai
             genai.configure(api_key=settings.GEMINI_API_KEY)
             result = genai.embed_content(
@@ -742,25 +684,21 @@ class VectorStore:
 
     def get_stats(self) -> Dict[str, Any]:
         """
-        Clear the vector store
-        
-        TODO: Implement this method
-        - Delete all embeddings (or filter by fund_id)
-
         Get statistics about the vector store.
 
         Returns:
             Dictionary with store statistics
         """
+        db = self.db if self.db else SessionLocal()
         try:
             # Get total count
             count_sql = text("SELECT COUNT(*) FROM document_embeddings")
-            result = self.db.execute(count_sql)
+            result = db.execute(count_sql)
             total_count = result.scalar()
 
             # Get count by fund
             fund_sql = text("SELECT fund_id, COUNT(*) FROM document_embeddings GROUP BY fund_id")
-            result = self.db.execute(fund_sql)
+            result = db.execute(fund_sql)
             fund_counts = {row[0]: row[1] for row in result}
 
             return {
@@ -781,3 +719,6 @@ class VectorStore:
                 "embedding_dimensions": self.embedding_dimensions,
                 "error": str(e)
             }
+        finally:
+            if not self.db:  # Only close if we created the session
+                db.close()

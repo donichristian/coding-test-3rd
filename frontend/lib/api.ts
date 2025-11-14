@@ -99,20 +99,31 @@ export const fundApi = {
   },
 }
 
-// Chat APIs with retry functionality
+// Chat APIs with retry functionality and async task polling
 export const chatApi = {
   query: async (query: string, fundId?: number, conversationId?: string, documentId?: number, retryCount: number = 0): Promise<any> => {
     const maxRetries = 3
     const baseDelay = 1000 // 1 second
 
     try {
-      const response = await api.post('/api/chat/query', {
+      // Submit chat query task
+      const taskResponse = await api.post('/api/chat/query', {
         query,
         fund_id: fundId,
         document_id: documentId,
         conversation_id: conversationId,
       })
-      return response.data
+
+      const taskData = taskResponse.data
+
+      // If task was submitted successfully, poll for results
+      if (taskData.task_id) {
+        return await pollTaskResult(taskData.task_id)
+      }
+
+      // Fallback: return the response directly if no task_id (shouldn't happen with new implementation)
+      return taskData
+
     } catch (error: any) {
       // Check if it's a network error and we haven't exceeded max retries
       if (retryCount < maxRetries && (
@@ -145,6 +156,51 @@ export const chatApi = {
     const response = await api.get(`/api/chat/conversations/${conversationId}`)
     return response.data
   },
+
+  // Poll for task results
+  getTaskStatus: async (taskId: string) => {
+    const response = await api.get(`/api/chat/tasks/${taskId}`)
+    return response.data
+  },
+}
+
+// Helper function to poll for task results
+async function pollTaskResult(taskId: string, maxAttempts: number = 30, interval: number = 1000): Promise<any> {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const taskStatus = await chatApi.getTaskStatus(taskId)
+
+      if (taskStatus.status === 'completed') {
+        // Transform the result to match the expected format
+        return {
+          answer: taskStatus.result.answer,
+          sources: taskStatus.result.sources,
+          metrics: taskStatus.result.metrics,
+          query: taskStatus.result.query,
+          fund_id: taskStatus.result.fund_id,
+          success: taskStatus.result.success,
+          processing_time: taskStatus.result.processing_time
+        }
+      } else if (taskStatus.status === 'failed') {
+        throw new Error(taskStatus.error || 'Task failed')
+      } else if (taskStatus.status === 'pending' || taskStatus.status === 'progress') {
+        // Wait and try again
+        await new Promise(resolve => setTimeout(resolve, interval))
+        continue
+      } else {
+        throw new Error(`Unknown task status: ${taskStatus.status}`)
+      }
+    } catch (error: any) {
+      // If it's a network error, wait and retry
+      if (error.code === 'NETWORK_ERROR' || error.message?.includes('Network Error') || !error.response) {
+        await new Promise(resolve => setTimeout(resolve, interval))
+        continue
+      }
+      throw error
+    }
+  }
+
+  throw new Error('Task polling timed out')
 }
 
 // Metrics APIs

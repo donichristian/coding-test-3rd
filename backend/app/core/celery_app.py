@@ -16,7 +16,7 @@ celery_app = Celery(
     "fund_analysis",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=["app.tasks.document_tasks"]
+    include=["app.tasks.document_tasks", "app.tasks.chat_tasks"]
 )
 
 # Configuration for production use
@@ -32,56 +32,67 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,  # Fair task distribution
     task_acks_late=True,  # Acknowledge after task completion
     worker_max_tasks_per_child=50,  # Restart worker after 50 tasks
+    broker_connection_retry_on_startup = True
 )
 
-# Global model cache for Celery workers (legacy - now uses shared global cache)
-_model_cache = {}
-
 @worker_process_init.connect
-def preload_models_on_worker_init(sender, **kwargs):
+def initialize_lazy_model_loader(sender, **kwargs):
     """
-    Pre-load ML models when Celery worker starts.
+    Initialize lazy model loader when Celery worker starts.
 
-    This ensures models are downloaded during Docker build to avoid runtime downloads.
-    Uses preload_models.py for actual loading logic.
+    This sets up the lazy loading system without pre-downloading models,
+    reducing startup time and Docker image size.
     """
     try:
-        logger.info("Pre-loading ML models in Celery worker...")
-        
-        # Import preload functions
+        logger.info("Initializing lazy model loader in Celery worker...")
+
+        # Import lazy model loader to ensure it's available
         import sys
-        import os
-        sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-        from preload_models import preload_sentence_transformers, preload_docling_models, preload_rapidocr_models
-        
-        # Run preloading
-        results = {
-            "sentence_transformers": preload_sentence_transformers(),
-            "docling": preload_docling_models(),
-            "rapidocr": preload_rapidocr_models(),
-        }
-        
-        # Log results
-        for model_name, success in results.items():
-            status = "✓" if success else "✗"
-            logger.info(f"{status} {model_name} model preloading in Celery worker")
+        sys.path.insert(0, '/app')
+        from lazy_model_loader import preload_critical_models
+
+        # Preload only the most critical models (optional, can be removed for maximum size reduction)
+        try:
+            preload_critical_models()
+            logger.info("✓ Critical models preloaded successfully in worker")
+        except Exception as e:
+            logger.warning(f"Could not preload critical models: {e}")
+            import traceback
+            traceback.print_exc()
+
+        logger.info("✓ Lazy model loader initialized in Celery worker")
 
     except Exception as e:
-        logger.error(f"Failed to pre-load models in worker: {e}")
+        logger.error(f"Failed to initialize lazy model loader: {e}")
+        import traceback
+        traceback.print_exc()
 
 def get_cached_model(model_name: str):
-    """Get a cached model instance."""
-    # Try global cache first, then fallback to local cache
+    """Get a cached model instance using lazy loading."""
+    import sys
+    sys.path.insert(0, '/app')
+    from lazy_model_loader import (
+        get_docling_converter,
+        get_sentence_transformer,
+        get_openai_client,
+        get_gemini_client
+    )
+
     try:
-        from app.core.model_cache import get_cached_model as get_global_model
-        model = get_global_model(model_name)
-        if model is not None:
-            return model
-    except ImportError:
-        pass
-    
-    # Fallback to local cache
-    return _model_cache.get(model_name)
+        if model_name == 'docling_converter':
+            return get_docling_converter()
+        elif model_name == 'sentence_transformers':
+            return get_sentence_transformer()
+        elif model_name == 'openai_client':
+            return get_openai_client()
+        elif model_name == 'gemini_client':
+            return get_gemini_client()
+        else:
+            logger.warning(f"Unknown model name: {model_name}")
+            return None
+    except Exception as e:
+        logger.error(f"Failed to get cached model {model_name}: {e}")
+        return None
 
 # For development - allows running celery from command line
 if __name__ == "__main__":
