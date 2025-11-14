@@ -223,7 +223,7 @@ class ContextFormatter:
                     context_parts.append(f"- {key}: {value}")
             context_parts.append("")
 
-        # Add retrieved document chunks with clean citations
+        # Add retrieved document chunks with citations
         if retrieved_docs:
             # Sort by score to ensure most relevant chunks come first
             sorted_docs = sorted(retrieved_docs, key=lambda x: x.get("score", 0), reverse=True)
@@ -626,7 +626,7 @@ class RAGEngine:
             # Step 3: Retrieve context
             logger.info(f"Searching for: '{enhanced_query}' with fund_id={fund_id}")
 
-            # Debug: Check if fund_id is None and how it affects filtering
+            # Check if fund_id is None and how it affects filtering
             if fund_id is None:
                 logger.warning("fund_id is None - searching across all documents without fund filtering")
 
@@ -634,7 +634,7 @@ class RAGEngine:
             retrieved_docs = self.context_retriever.retrieve_sync(enhanced_query, fund_id, similarity_threshold=0.1)
             logger.info(f"Retrieved {len(retrieved_docs)} document chunks with threshold 0.1")
 
-            # Debug: Check similarity scores for failed retrievals
+            # Check similarity scores for failed retrievals
             if len(retrieved_docs) == 0:
                 logger.warning(f"No chunks retrieved for query: '{enhanced_query}' with threshold 0.1")
                 # Try with very low threshold as last resort
@@ -665,7 +665,7 @@ class RAGEngine:
                     "metadata": {"no_documents": True}
                 }
 
-            # Debug: Log retrieved chunks and their content preview
+            # Log retrieved chunks and their content preview
             for i, doc in enumerate(retrieved_docs[:5]):  # Check more chunks
                 content_preview = doc.get("content", "")[:300]  # Longer preview
                 score = doc.get("score", 0)

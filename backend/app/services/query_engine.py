@@ -40,10 +40,10 @@ class QueryEngine:
         """
         start_time = time.time()
 
-        # Use the new RAG engine for processing with conversation history
+        # Use the RAG engine for processing with conversation history
         result = await self.rag_engine.query(query, fund_id, conversation_history)
 
-        # If no context was retrieved, try synchronous retrieval
+        # If no context was retrieved, try synchronous retrieval as fallback
         if not result.get("sources") or len(result.get("sources", [])) == 0:
             try:
                 sync_results = self.rag_engine.context_retriever.retrieve_sync(query, fund_id)

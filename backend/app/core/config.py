@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
-
+    
     # AI Provider Configurations
     # OpenAI
     OPENAI_API_KEY: str = ""

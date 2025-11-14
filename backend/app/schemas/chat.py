@@ -22,7 +22,7 @@ class ChatQueryRequest(BaseModel):
 
 
 class SourceDocument(BaseModel):
-    """Source document schema with enhanced citation support"""
+    """Source document schema with citation support"""
     content: str
     metadata: Dict[str, Any]
     score: Optional[float] = None
@@ -30,7 +30,7 @@ class SourceDocument(BaseModel):
     page_number: Optional[int] = None
     chunk_index: Optional[int] = None
     confidence_score: Optional[float] = None
-    citation_text: Optional[str] = None  # Formatted citation for display
+    citation_text: Optional[str] = None
 
 
 class ChatQueryResponse(BaseModel):

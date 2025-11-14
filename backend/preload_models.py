@@ -53,6 +53,7 @@ def preload_docling_models():
     """Pre-initialize docling to download any required models"""
     try:
         logger.info("Pre-loading docling and RapidOCR models...")
+        
         from docling.document_converter import DocumentConverter
         from docling.datamodel.pipeline_options import PdfPipelineOptions
         from docling.document_converter import PdfFormatOption
@@ -139,6 +140,7 @@ def preload_sentence_transformers():
     """Pre-download sentence-transformers models"""
     try:
         logger.info("Pre-loading sentence-transformers models...")
+        
         from sentence_transformers import SentenceTransformer
 
         # Use a common model that's likely to be used

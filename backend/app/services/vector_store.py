@@ -53,6 +53,7 @@ class VectorStore:
             db: SQLAlchemy session (creates new one if None)
         """
         self.db = db
+        self.embedding_configs = settings.EMBEDDING_CONFIGS
         self.embedding_provider = self._initialize_embeddings()
         self.embedding_dimensions = settings.EMBEDDING_CONFIGS.get(
             self.embedding_provider, {"dimensions": 384}
@@ -372,7 +373,7 @@ class VectorStore:
         similarity_threshold: Optional[float] = None
     ) -> List[Dict[str, Any]]:
         """
-        Synchronous version of similarity_search for API endpoints.
+        Synchronous version of similarity_search for Celery.
 
         Args:
             query: Search query text
@@ -426,6 +427,7 @@ class VectorStore:
                     1 - (embedding <=> (:embedding)::vector) as similarity_score
                 FROM document_embeddings
                 {f"WHERE {where_clause}" if where_clause else ""}
+                {threshold_condition}
                 ORDER BY embedding <=> (:embedding)::vector
                 LIMIT :k
             """)
@@ -467,7 +469,7 @@ class VectorStore:
             # Limit to top k after filtering
             results = results[:k]
 
-            # Debug: Log all similarity scores before filtering
+            # Log all similarity scores before filtering
             all_scores = []
             for row in result:
                 score = float(row[5])
